@@ -1,12 +1,19 @@
 import { defineConfig } from 'vite';
+import path from 'path'; // If using aliases
 
 export default defineConfig({
-  build: {
-    chunkSizeWarningLimit: 1600, // Phaser + new code might exceed default
-  },
+  plugins: [],
   server: {
-    // Optional: configure server port
-    // port: 3000
+    port: 8080 // Default, TDD 12.1
   },
-  assetsInclude: ['**/*.png', '**/*.jpg', '**/*.jpeg', '**/*.gif', '**/*.svg', '**/*.wav', '**/*.mp3', '**/*.ogg']
+  resolve: { // Optional for aliases
+    alias: {
+      '@': path.resolve(__dirname, './src'),
+    },
+  },
+  build: {
+      outDir: 'dist' // TDD 2.1, 12.2
+  },
+  
+  publicDir: 'public' // TDD 2.1, 2.6, 10.2
 });
