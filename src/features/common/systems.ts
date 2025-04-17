@@ -63,7 +63,7 @@ const playerCombatQuery = defineQuery([
   PhysicsBody,
   Health,
 ]);
-const combatStateQuery = defineQuery([CombatState]);
+// const combatStateQuery = defineQuery([CombatState]);
 const hitboxQuery = defineQuery([Hitbox, Position, PhysicsBody]); // Hitboxes have physics bodies
 const enemyQuery = defineQuery([
   Enemy,
@@ -271,7 +271,7 @@ export function combatSystem(world: IWorld, resources: SystemResources) {
 
 // --- NEW: Hitbox System (Manages hitbox lifetime and position) ---
 export function hitboxSystem(world: IWorld, resources: SystemResources) {
-  const { time, delta } = resources;
+  const { time } = resources;
   const entities = hitboxQuery(world); // Query active hitboxes
 
   for (const eid of entities) {
@@ -333,7 +333,7 @@ export function hitboxSystem(world: IWorld, resources: SystemResources) {
 }
 
 // --- NEW: Damage System (Applies damage from TakeDamage component) ---
-export function damageSystem(world: IWorld, resources: SystemResources) {
+export function damageSystem(world: IWorld) {
   const entities = damageQuery(world);
   const playerEntities = playerCombatQuery(world); // Need this to find the player EID easily
 
@@ -371,8 +371,8 @@ export function damageSystem(world: IWorld, resources: SystemResources) {
 }
 
 // --- Movement System (Basic Ground - TDD 3.2.4, 6.1) ---
-export function movementSystem(world: IWorld, resources: SystemResources) {
-  const { delta } = resources;
+export function movementSystem(world: IWorld){ //resources: SystemResources) {
+  // const { delta } = resources;
   const speed = 200; // Base speed, move to config/component later
   const sprintMultiplier = 1.5; // Example sprint speed increase
 
@@ -578,7 +578,7 @@ export function renderSystem(world: IWorld, resources: SystemResources) {
 
 // --- Animation System (TDD 4.6) ---
 // Determines which animation should play based on MovementState
-export function animationSystem(world: IWorld, resources: SystemResources) {
+export function animationSystem(world: IWorld) {
   const entities = defineQuery([Renderable, MovementState])(world); // Entities with state and visuals
 
   for (const eid of entities) {
@@ -746,22 +746,23 @@ export function physicsSystem(world: IWorld, resources: SystemResources) {
 // --- State Sync System (TDD 3.1, 3.3) ---
 // Syncs ECS stat components (Health, Qi, Stamina) with Zustand store
 // Runs less frequently or only when changes occur?
-export function stateSyncSystem(world: IWorld, resources: SystemResources) {
+export function stateSyncSystem(world: IWorld) {
   const playerEntities = defineQuery([
     PlayerControlled,
     Health,
     QiPool,
     StaminaPool,
   ])(world);
-  const { setCoreStats } = usePlayerStore.getState(); // Get action outside loop
+  // const { setCoreStats } = usePlayerStore.getState(); // Get action outside loop
 
   for (const eid of playerEntities) {
     // Read from ECS, write to Zustand
     // This direction might be less common; usually it's Zustand -> ECS initialization
     // Or ECS systems directly modify Zustand on significant events (like taking damage)
-    const currentECSHealth = Health.current[eid];
-    const currentECSMaxHealth = Health.max[eid];
+    // const currentECSHealth = Health.current[eid];
+    // const currentECSMaxHealth = Health.max[eid];
     // Compare with Zustand state? Or just push ECS state?
+    Health.current[eid];
 
     // Example: Combat system detects hit, updates Health component, THEN dispatches to Zustand
     // Example: Resource regeneration system updates QiPool/StaminaPool, THEN dispatches to Zustand
