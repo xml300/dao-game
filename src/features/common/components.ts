@@ -116,17 +116,24 @@ export const Enemy = defineComponent({
 // --- Utilities for Component Management ---
 
 // Simple mapping for string keys to number IDs (improve later if needed)
-export const spriteKeyMap = new Map<string, number>();
-export const animationKeyMap = new Map<string, number>();
+const spriteKeyMap = new Map<string, number>();
+const animationKeyMap = new Map<string, number>();
 let nextSpriteKeyId = 0;
 let nextAnimationKeyId = 0;
+const physicsBodyMap = new Map<number, Phaser.Physics.Arcade.Body>();
+let nextPhysicsBodyId = 1;
+
+
 
 export function getSpriteKeyId(key: string): number {
     if (!spriteKeyMap.has(key)) {
-        spriteKeyMap.set(key, nextSpriteKeyId++);
+        const id = nextSpriteKeyId++;
+        spriteKeyMap.set(key, id);
+        console.log(`Component Utils: Registered sprite key "${key}" as ID ${id}`);
     }
     return spriteKeyMap.get(key)!;
 }
+
 export function getAnimationKeyId(key: string): number {
      if (!animationKeyMap.has(key)) {
          animationKeyMap.set(key, nextAnimationKeyId++);
@@ -146,10 +153,6 @@ export function getAnimationKeyById(id: number): string | undefined {
      }
      return undefined;
 }
-
-// Map Phaser physics bodies (Improve this simple ID mapping)
-export const physicsBodyMap = new Map<number, Phaser.Physics.Arcade.Body>();
-let nextPhysicsBodyId = 1; // Start from 1, 0 might be invalid
 
 export function registerPhysicsBody(body: Phaser.Physics.Arcade.Body): number {
     const id = nextPhysicsBodyId++;

@@ -1,3 +1,6 @@
+import { SystemResources } from "@/features/common/systems";
+import { IWorld } from "bitecs";
+
 // TDD Appendix 13.1 - Player State Slice (Example Subset)
 export interface IPlayerCoreStats {
     health: { current: number; max: number };
@@ -104,3 +107,8 @@ export interface InputState {
   export interface PlayerControlled {} // Tag component
   export interface InputState { /* ... processed input data ... */ }
   export interface PhysicsBody { bodyRef: any /* Phaser Body or ID */; }
+
+
+export interface InWorld extends IWorld{
+    resources: SystemResources;
+}

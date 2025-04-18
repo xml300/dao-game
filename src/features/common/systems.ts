@@ -1,6 +1,5 @@
 // src/features/common/systems.ts
-import {
-  IWorld,
+import { 
   addComponent,
   addEntity,
   defineQuery,
@@ -33,6 +32,8 @@ import {
 } from "./components";
 import { Health, QiPool, StaminaPool } from "./components";
 import { usePlayerStore } from "@/state/player.store";
+import { InWorld } from "@/types";
+import * as AssetKeys from "@/constants/assets"; // Import constants
 
 // --- System Inputs/Resources ---
 // Define interfaces for resources systems need, like Phaser scene or input manager
@@ -50,7 +51,14 @@ const playerInputQuery = defineQuery([
   PhysicsBody,
   MovementState,
 ]);
-const movementQuery = defineQuery([Position, Velocity, PhysicsBody]);
+const movementQuery = defineQuery([
+  Position,
+  Velocity,
+  PhysicsBody,
+  MovementState,
+]);
+const physicsQuery = defineQuery([Position, PhysicsBody]); // Query for position sync
+const combatStateQuery = defineQuery([CombatState]); // Can be useful
 const renderableQuery = defineQuery([Position, Rotation, Renderable]);
 const newRenderableQuery = enterQuery(renderableQuery); // Entities newly matching renderableQuery
 const exitedRenderableQuery = exitQuery(renderableQuery); // Entities no longer matching
@@ -78,9 +86,25 @@ const damageQuery = defineQuery([TakeDamage, Health]); // Entities that should t
 const spriteMap = new Map<number, Phaser.GameObjects.Sprite>();
 const hitboxHitRegistry = new Map<number, Set<number>>();
 
+export function syncPositionSystem(world: InWorld) {
+  const entities = physicsQuery(world);
+  for (const eid of entities) {
+    const bodyId = PhysicsBody.bodyId[eid];
+    const body = getPhysicsBody(bodyId);
+    // Use the GameObject's position as it's the source of truth after physics simulation
+    const gameObject = body?.gameObject;
+    if (gameObject) {
+      Position.x[eid] = gameObject?.body?.position.x || Position.x[eid];
+      Position.y[eid] = gameObject.body?.position.y || Position.y[eid];
+      // Sync rotation if necessary (though we set angle in renderSystem)
+      // Rotation.angle[eid] = gameObject.angle;
+    }
+  }
+}
+
 // --- Input System (TDD 3.2) ---
-export function inputSystem(world: IWorld, resources: SystemResources) {
-  const { scene } = resources;
+export function inputSystem(world: InWorld) { 
+  const { scene } = world.resources;
   const cursors = scene.input.keyboard?.createCursorKeys();
   const keySpace = scene.input.keyboard?.addKey(
     Phaser.Input.Keyboard.KeyCodes.SPACE
@@ -123,6 +147,7 @@ export function inputSystem(world: IWorld, resources: SystemResources) {
       InputState.moveY[eid] = moveY / length;
     }
 
+
     // TODO: Process Gamepad Input
     // TODO: Read Mouse Input for relevant actions (attack, interact?)
 
@@ -131,8 +156,8 @@ export function inputSystem(world: IWorld, resources: SystemResources) {
 }
 
 // --- NEW: Cooldown System ---
-export function cooldownSystem(world: IWorld, resources: SystemResources) {
-  const { delta } = resources;
+export function cooldownSystem(world: InWorld) {
+  const { delta } = world.resources;
   const deltaMs = delta * 1000;
   const entities = defineQuery([Cooldown])(world);
 
@@ -147,11 +172,10 @@ export function cooldownSystem(world: IWorld, resources: SystemResources) {
 }
 
 // --- NEW: Combat System (Handles initiating actions) ---
-export function combatSystem(world: IWorld, resources: SystemResources) {
-  const { time, delta } = resources;
+export function combatSystem(world: InWorld) {
+  const { time, delta } = world.resources;
   const deltaMs = delta * 1000;
   const playerEntities = playerCombatQuery(world); // Query entities that can perform combat actions
-  
 
   for (const eid of playerEntities) {
     CombatState.canMove[eid] = 1; // Allow movement
@@ -270,8 +294,8 @@ export function combatSystem(world: IWorld, resources: SystemResources) {
 }
 
 // --- NEW: Hitbox System (Manages hitbox lifetime and position) ---
-export function hitboxSystem(world: IWorld, resources: SystemResources) {
-  const { time } = resources;
+export function hitboxSystem(world: InWorld) {
+  const { time } = world.resources;
   const entities = hitboxQuery(world); // Query active hitboxes
 
   for (const eid of entities) {
@@ -329,11 +353,11 @@ export function hitboxSystem(world: IWorld, resources: SystemResources) {
       );
       continue;
     }
-}
+  }
 }
 
 // --- NEW: Damage System (Applies damage from TakeDamage component) ---
-export function damageSystem(world: IWorld) {
+export function damageSystem(world: InWorld) {
   const entities = damageQuery(world);
   const playerEntities = playerCombatQuery(world); // Need this to find the player EID easily
 
@@ -371,133 +395,92 @@ export function damageSystem(world: IWorld) {
 }
 
 // --- Movement System (Basic Ground - TDD 3.2.4, 6.1) ---
-export function movementSystem(world: IWorld){ //resources: SystemResources) {
-  // const { delta } = resources;
+export function movementSystem(world: InWorld) {
+  //resources: SystemResources) {
+  // const { delta } = world.resources;
   const speed = 200; // Base speed, move to config/component later
   const sprintMultiplier = 1.5; // Example sprint speed increase
 
-  const playerEntities = playerInputQuery(world); // Get player specifically
-  for (const eid of playerEntities) {
+  // --- Sync Physics Body Position back to ECS Position ---
+  // Necessary because Arcade Physics updates the body directly
+  const movingEntities = defineQuery([
+    PlayerControlled,
+    InputState,
+    Velocity,
+    PhysicsBody,
+    MovementState,
+    CombatState, // Needed to check 'canMove'
+    StaminaPool, // Needed for sprinting cost
+  ])(world);
+  for (const eid of movingEntities) {
+    console.log(eid);
     const bodyId = PhysicsBody.bodyId[eid];
-    const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body; // Assuming body exists
+    const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body;
     if (!body) continue;
 
     const inputX = InputState.moveX[eid];
     const inputY = InputState.moveY[eid];
+    const isSprinting = InputState.sprint[eid] === 1;
     const canMove = CombatState.canMove[eid] === 1;
-    // TODO: Check Stamina (TDD 4.2.1 - Sprint) before applying sprint speed
+    console.log(InputState.moveX);
 
-   
+    // Add this log:
+if (inputX !== 0 || inputY !== 0) {
+  console.log(`MovementSystem[${eid}]: Input=(${inputX},${inputY}), CanMove=${canMove}, Body=${body ? 'Exists' : 'MISSING!'}`);
+}
+
     let targetVelocityX = 0;
     let targetVelocityY = 0;
-    if (canMove) {
-        const isSprinting = InputState.sprint[eid] === 1;
-        const currentSpeed = isSprinting ? speed * sprintMultiplier : speed;
-        targetVelocityX = inputX * currentSpeed;
-        targetVelocityY = inputY * currentSpeed;
+    let isActuallySprinting = false;
 
-         // --- LOGGING START ---
-        if (targetVelocityX !== 0 || targetVelocityY !== 0) {
-            console.log(`MovementSystem[${eid}]: Setting Velocity=(${targetVelocityX}, ${targetVelocityY})`);
-        }
-         // --- LOGGING END ---
-    } else if (inputX !== 0 || inputY !== 0) { // Log if trying to move but can't
-         console.log(`MovementSystem[${eid}]: Movement blocked by CombatState.canMove=${CombatState.canMove[eid]}`);
+    if (canMove) {
+      let currentSpeed = speed;
+      // Check stamina for sprint (TDD 4.2.1) - Basic check
+      if (isSprinting && StaminaPool.current[eid] > 0) {
+        currentSpeed = speed * sprintMultiplier;
+        isActuallySprinting = true;
+        // TODO: Dispatch stamina consumption action to Zustand or update component directly
+        // StaminaPool.current[eid] -= STAMINA_COST_PER_FRAME; // Requires delta time if done here
+      }
+
+      targetVelocityX = inputX * currentSpeed;
+      targetVelocityY = inputY * currentSpeed;
+
+      // --- Update MovementState (for animation) ---
+      if (Math.abs(targetVelocityX) > 0 || Math.abs(targetVelocityY) > 0) {
+        MovementState.isRunning[eid] = 1;
+        MovementState.isIdle[eid] = 0;
+        // TODO: Add isSprinting state if needed for animations
+      } else {
+        MovementState.isRunning[eid] = 0;
+        MovementState.isIdle[eid] = 1;
+      }
+
+      // --- Update Rotation ---
+      if (inputX < 0) Rotation.angle[eid] = 180;
+      else if (inputX > 0) Rotation.angle[eid] = 0;
+    } else {
+      // If movement is blocked (e.g., attacking), ensure movement state reflects not moving
+      MovementState.isRunning[eid] = 0;
+      MovementState.isIdle[eid] = 0; // Allow attack/other animations to take priority
     }
+
+    if (targetVelocityX !== 0 || targetVelocityY !== 0 || (inputX !==0 || inputY !==0)) { // Log even if target is 0 but input wasn't
+      console.log(`MovementSystem[${eid}]: Setting Body Velocity=(${targetVelocityX}, ${targetVelocityY})`);
+  }
 
     // Set velocity on the actual Phaser body
     body.setVelocityX(targetVelocityX);
     body.setVelocityY(targetVelocityY);
 
-    // Update MovementState for animation (Basic Idle/Run)
-    if (Math.abs(targetVelocityX) > 0 || Math.abs(targetVelocityY) > 0) {
-      MovementState.isRunning[eid] = 1;
-      MovementState.isIdle[eid] = 0;
-    } else {
-      MovementState.isRunning[eid] = 0;
-      MovementState.isIdle[eid] = 1;
-    }
-
-    // Basic Rotation based on horizontal movement
-    if (inputX < 0) {
-      // Flip sprite (handled in render system or directly on body)
-      // body.gameObject.setFlipX(true); // If using sprite directly
-      Rotation.angle[eid] = 180; // Or use flip flag in Renderable
-    } else if (inputX > 0) {
-      // body.gameObject.setFlipX(false);
-      Rotation.angle[eid] = 0;
-    }
-
-    // TODO: Add flight logic (TDD 6.2) based on a flag (e.g., MovementState.isFlying)
-    // TODO: Add dodge movement impulse (TDD 4.2.1)
-  }
-
-  // --- Sync Physics Body Position back to ECS Position ---
-  // Necessary because Arcade Physics updates the body directly
-  const movingEntities = movementQuery(world);
-  for (const eid of movingEntities) {
-    const bodyId = PhysicsBody.bodyId[eid];
-    const body = getPhysicsBody(bodyId);
-    if (body?.gameObject instanceof Phaser.GameObjects.Sprite) {
-      Position.x[eid] = body.gameObject.x;
-      Position.y[eid] = body.gameObject.y;
-    } else if (body) {
-      // Handle case where body might not be attached to a sprite? Unlikely for dynamic objects.
-      Position.x[eid] = body.x + body.width * body.offset.x; // Adjust for body origin/offset if needed
-      Position.y[eid] = body.y + body.height * body.offset.y;
-    }
-  }
-
-  const playerCombatEntities = playerCombatQuery(world); // Ensure this query includes CombatState
-  for (const eid of playerCombatEntities) {
-    const bodyId = PhysicsBody.bodyId[eid];
-    const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body;
-    if (!body) continue;
-
-    const moveX = InputState.moveX[eid];
-    const moveY = InputState.moveY[eid];
-    const isSprinting = InputState.sprint[eid] === 1;
-    const canMove = CombatState.canMove[eid] === 1; // Check CombatState flag
-
-    // --- Apply movement only if allowed ---
-    let targetVelocityX = 0;
-    let targetVelocityY = 0;
-    if (canMove) {
-      const currentSpeed = isSprinting ? speed * sprintMultiplier : speed;
-      targetVelocityX = moveX * currentSpeed;
-      targetVelocityY = moveY * currentSpeed;
-    }
-    body.setVelocityX(targetVelocityX);
-    body.setVelocityY(targetVelocityY);
-
-    // Update MovementState for animation (Basic Idle/Run) - Only if not attacking/etc.
-    if (
-      canMove &&
-      (Math.abs(targetVelocityX) > 0 || Math.abs(targetVelocityY) > 0)
-    ) {
-      MovementState.isRunning[eid] = 1;
-      MovementState.isIdle[eid] = 0;
-    } else if (canMove) {
-      // Only set idle if allowed to move but not moving
-      MovementState.isRunning[eid] = 0;
-      MovementState.isIdle[eid] = 1;
-    } else {
-      // If cannot move (e.g., attacking), force idle animation state? Or attacking state handles anim?
-      MovementState.isRunning[eid] = 0;
-      MovementState.isIdle[eid] = 0; // Attacking state will override this in animation system
-    }
-
-    // Basic Rotation based on horizontal movement (only if canMove?)
-    if (canMove) {
-      if (moveX < 0) Rotation.angle[eid] = 180;
-      else if (moveX > 0) Rotation.angle[eid] = 0;
-    }
+    // TODO: Implement stamina consumption logic (maybe in a separate resourceSystem?)
+    // if (isActuallySprinting) { usePlayerStore.getState().consumeStamina(STAMINA_COST); }
   }
 }
 
 // --- Render System (TDD 2.5 Bridge, 4.6) ---
-export function renderSystem(world: IWorld, resources: SystemResources) {
-  const { scene } = resources;
+export function renderSystem(world: InWorld) {
+  const { scene } = world.resources;
 
   // Handle newly added renderable entities
   const entered = newRenderableQuery(world);
@@ -578,16 +561,16 @@ export function renderSystem(world: IWorld, resources: SystemResources) {
 
 // --- Animation System (TDD 4.6) ---
 // Determines which animation should play based on MovementState
-export function animationSystem(world: IWorld) {
-  const entities = defineQuery([Renderable, MovementState])(world); // Entities with state and visuals
+export function animationSystem(world: InWorld) {
+  const entities = defineQuery([Renderable, MovementState, CombatState])(world); // Entities with state and visuals
 
   for (const eid of entities) {
     let targetAnimKeyId = Renderable.animationKey[eid]; // Keep current if no state matches
 
     // TODO: Get actual animation keys ('player_idle', 'player_run')
-    const idleAnimId = getAnimationKeyId("player_idle"); // Replace with actual keys
-    const runAnimId = getAnimationKeyId("player_run"); // Replace with actual keys
-    const attackLight1AnimId = getAnimationKeyId("player_attack_light1");
+    const idleAnimId = getAnimationKeyId(AssetKeys.Anims.PLAYER_IDLE); // Replace with actual keys
+    const runAnimId = getAnimationKeyId(AssetKeys.Anims.PLAYER_RUN); // Replace with actual keys
+    const attackLight1AnimId = getAnimationKeyId(AssetKeys.Anims.PLAYER_ATTACK_LIGHT_1);
 
     // Logic based on MovementState flags (add more states later)
     if (CombatState.isAttackingLight[eid]) {
@@ -610,241 +593,218 @@ export function animationSystem(world: IWorld) {
 
 // --- Physics Sync System (TDD 2.5 Bridge) ---
 // Manages creation/deletion of Phaser physics bodies based on ECS components
-export function physicsSystem(world: IWorld, resources: SystemResources) {
-  const { scene } = resources;
-  // Query for entities that SHOULD have a physics body but might not yet
-  const physicsQuery = defineQuery([Position, PhysicsBody]);
+export function physicsSystem(world: InWorld) {
+  const { scene } = world.resources;
   const enteredPhysics = enterQuery(physicsQuery)(world);
   const exitedPhysics = exitQuery(physicsQuery)(world); // Entities losing physics requirement
 
+  if (!(scene as any).playerColliderAdded) {
+    (scene as any).playerColliderAdded = false;
+  }
+
   for (const eid of enteredPhysics) {
+    // Only process if the body hasn't been created yet
     if (PhysicsBody.bodyId[eid] === 0) {
-      let targetGameObject: Phaser.GameObjects.GameObject | null = null;
+      let targetGameObject:
+        | Phaser.GameObjects.Sprite
+        | Phaser.GameObjects.Image
+        | null = null;
+      let isSpriteRenderable = false;
 
       if (hasComponent(world, Renderable, eid)) {
-        // Is it a visible entity?
-        targetGameObject = spriteMap.get(eid) ?? null; // Check if sprite exists first
+        targetGameObject = spriteMap.get(eid) ?? null;
+        isSpriteRenderable = true;
       }
 
       if (targetGameObject || hasComponent(world, Hitbox, eid)) {
-        // Or is it just a hitbox?
         let bodyInstance: Phaser.Physics.Arcade.Body | null = null;
 
         if (targetGameObject) {
-          // Add physics body TO the existing sprite
           scene.physics.world.enable(targetGameObject);
           bodyInstance = targetGameObject.body as Phaser.Physics.Arcade.Body;
+          // Set data on the GO for easier lookup in callbacks
+          targetGameObject.setData("eid", eid);
           console.log(
-            `PhysicsSystem: Enabled physics body on sprite for entity ${eid}`
+            `PhysicsSystem: Enabled physics on existing GO for EID ${eid}`
           );
         } else {
-          // It's a hitbox without a sprite, create an invisible body
-          // We need a way to manage these non-sprite bodies. Add them to a group?
-          // Simplest for now: use an invisible sprite (less efficient)
+          // Hitbox without a sprite
+          // Using a sensor body (no sprite needed) is more complex to manage.
+          // Stick with invisible sprite workaround for now unless performance dictates otherwise.
           const x = Position.x[eid];
           const y = Position.y[eid];
-          const w = PhysicsBody.width[eid];
-          const h = PhysicsBody.height[eid];
-          // WORKAROUND: Create temporary invisible sprite to hold the body
           const hitboxSprite = scene.add
             .sprite(x, y, "")
             .setVisible(false)
             .setActive(false);
+          hitboxSprite.setData("eid", eid); // Tag the temp sprite too
           scene.physics.world.enable(hitboxSprite);
           bodyInstance = hitboxSprite.body as Phaser.Physics.Arcade.Body;
-          bodyInstance.setSize(w, h); // Set correct size
-          // Store reference to this temporary sprite? Or just the body? Store body.
-          console.log(`PhysicsSystem: Created physics body for hitbox ${eid}`);
+          console.log(
+            `PhysicsSystem: Created temp sprite & body for hitbox EID ${eid}`
+          );
         }
 
         if (bodyInstance) {
           const bodyId = registerPhysicsBody(bodyInstance);
           PhysicsBody.bodyId[eid] = bodyId;
-          // Configure body from component data
+
+          // Configure body properties
           bodyInstance.setSize(PhysicsBody.width[eid], PhysicsBody.height[eid]);
           bodyInstance.setOffset(
             PhysicsBody.offsetX[eid],
             PhysicsBody.offsetY[eid]
           );
-          bodyInstance.setCollideWorldBounds(false); // Hitboxes usually shouldn't collide with world bounds
-          bodyInstance.allowGravity = false; // Hitboxes ignore gravity
-          bodyInstance.enable = false; // Start disabled, hitboxSystem enables it based on time
-          // Add overlap setup here? Or in a dedicated collision system? Let's do it here for now.
+          bodyInstance.setCollideWorldBounds(PhysicsBody.collides[eid] === 1); // Use component flag
+          bodyInstance.allowGravity = false; // Default for this game type
+          bodyInstance.enable = !hasComponent(world, Hitbox, eid); // Enable immediately unless it's a hitbox
 
-          if (hasComponent(world, Hitbox, eid) && Hitbox.filter[eid] === 0) {
-            // Player hitbox
-            // Find enemy physics group/entities to overlap with
-            // This is inefficient - better to use groups.
-            const enemyEntities = enemyQuery(world);
-            for (const enemyEid of enemyEntities) {
-              const enemyBodyId = PhysicsBody.bodyId[enemyEid];
-              const enemyBody = getPhysicsBody(enemyBodyId);
-              if (enemyBody?.gameObject) {
-                scene.physics.add.overlap(
-                  bodyInstance.gameObject,
-                  enemyBody.gameObject,
-                  handleHitboxOverlap,
-                  undefined,
-                  scene
-                );
+          // --- Overlap Setup ---
+          if (hasComponent(world, Hitbox, eid)) {
+            bodyInstance.enable = false; // Ensure hitbox body starts disabled
+            if (Hitbox.filter[eid] === 0) {
+              // Player hitbox
+              // Find enemy physics group (MORE EFFICIENT - requires enemy group)
+              // const enemyGroup = scene.enemyGroup; // Assuming group exists
+              // scene.physics.add.overlap(bodyInstance.gameObject, enemyGroup, handleHitboxOverlap, undefined, scene);
+
+              // Less efficient fallback (iterate known enemies)
+              const enemyEntities = enemyQuery(world);
+              for (const enemyEid of enemyEntities) {
+                const enemyBodyId = PhysicsBody.bodyId[enemyEid];
+                const enemyBody = getPhysicsBody(enemyBodyId);
+                if (enemyBody?.gameObject) {
+                  scene.physics.add.overlap(
+                    bodyInstance.gameObject,
+                    enemyBody.gameObject,
+                    handleHitboxOverlap
+                  );
+                }
               }
-            }
-            console.log(
-              `PhysicsSystem: Added overlap detection for player hitbox ${eid}`
-            );
+              console.log(
+                `PhysicsSystem: Added overlap for Player Hitbox EID ${eid}`
+              );
+            } // Add else block for enemy hitboxes targeting player group/entity
           }
-          // TODO: Add overlap setup for enemy hitboxes hitting player
+
+          // --- Scene Collider Setup (Example for Player) ---
+          // Add scene specific colliders here when the body is created
+          if (
+            hasComponent(world, PlayerControlled, eid) &&
+            bodyInstance.gameObject
+          ) {
+            // Assuming platforms group exists on the scene
+            const platforms = scene.physics.world.staticBodies.getArray()[0]; // Find static group (brittle)
+            if (platforms && !(scene as any).playerColliderAdded) {
+              scene.physics.add.collider(bodyInstance.gameObject, platforms);
+              (scene as any).playerColliderAdded = true; // Add only once
+              console.log(
+                `PhysicsSystem: Added player-platform collider for EID ${eid}`
+              );
+            }
+          }
         } else {
           console.error(
-            `PhysicsSystem: Failed to enable/create physics for entity ${eid}`
+            `PhysicsSystem: Failed to create/enable physics body for EID ${eid}`
           );
         }
-      } else {
-        // console.warn(`PhysicsSystem: Entity ${eid} needs physics but Renderable sprite/Hitbox component not found yet.`);
+      } else if (isSpriteRenderable && !targetGameObject) {
+        console.warn(
+          `PhysicsSystem: EID ${eid} has Renderable but sprite not found in map yet. Physics body creation delayed.`
+        );
       }
     }
   }
 
-  // Clean up physics bodies for entities that no longer need them
+  // Cleanup exited bodies
   for (const eid of exitedPhysics) {
     const bodyId = PhysicsBody.bodyId[eid];
     if (bodyId !== 0) {
       const body = getPhysicsBody(bodyId);
       if (body) {
-        if (body.gameObject) {
-          // Check if it's attached to a GO we can disable
-          scene.physics.world.disable(body.gameObject);
-          if (!body.gameObject.scene) {
-            // If the GO was destroyed (e.g., hitbox sprite workaround)
-            // Body might already be gone
-          } else if (
+        const gameObject = body.gameObject;
+        if (gameObject) {
+          scene.physics.world.disable(gameObject);
+           // Check if it was a temporary hitbox sprite
+          if (
             !hasComponent(world, Renderable, eid) &&
-            hasComponent(world, Hitbox, eid)
+            gameObject.texture?.key === ""
           ) {
-            // If it was the temporary hitbox sprite, destroy it
-            body.gameObject.destroy();
+            gameObject.destroy(); // Clean up the temporary sprite
             console.log(
-              `PhysicsSystem: Destroyed temp sprite for hitbox body ${bodyId}`
+              `PhysicsSystem: Destroyed temp sprite for BodyID ${bodyId} (EID ${eid})`
             );
           }
           console.log(
-            `PhysicsSystem: Disabled/removed physics body ${bodyId} for entity ${eid}`
+            `PhysicsSystem: Disabled physics for BodyID ${bodyId} (EID ${eid})`
           );
         } else {
-          // Standalone body? Destroy directly.
+          // Body might not have a GO if managed differently (less likely with current setup)
           body.destroy();
           console.log(
-            `PhysicsSystem: Destroyed standalone physics body ${bodyId} for entity ${eid}`
+            `PhysicsSystem: Destroyed standalone body BodyID ${bodyId} (EID ${eid})`
           );
         }
         removePhysicsBody(bodyId);
-        // PhysicsBody.bodyId[eid] = 0; // Component is being removed anyway
       }
+    }
+    // Ensure playerColliderAdded flag is reset if the player entity is removed
+    if (hasComponent(world, PlayerControlled, eid)) {
+      (scene as any).playerColliderAdded = false;
     }
   }
 }
-// --- State Sync System (TDD 3.1, 3.3) ---
-// Syncs ECS stat components (Health, Qi, Stamina) with Zustand store
-// Runs less frequently or only when changes occur?
-export function stateSyncSystem(world: IWorld) {
-  const playerEntities = defineQuery([
-    PlayerControlled,
-    Health,
-    QiPool,
-    StaminaPool,
-  ])(world);
-  // const { setCoreStats } = usePlayerStore.getState(); // Get action outside loop
-
-  for (const eid of playerEntities) {
-    // Read from ECS, write to Zustand
-    // This direction might be less common; usually it's Zustand -> ECS initialization
-    // Or ECS systems directly modify Zustand on significant events (like taking damage)
-    // const currentECSHealth = Health.current[eid];
-    // const currentECSMaxHealth = Health.max[eid];
-    // Compare with Zustand state? Or just push ECS state?
-    Health.current[eid];
-
-    // Example: Combat system detects hit, updates Health component, THEN dispatches to Zustand
-    // Example: Resource regeneration system updates QiPool/StaminaPool, THEN dispatches to Zustand
-
-    // Let's assume for now initialization happens GameScene -> ECS
-    // And updates happen ECS System -> Zustand Action
-  }
-
-  // Initialization direction (Zustand -> ECS) could happen once in GameScene.create
-}
-
+ 
 declare module "phaser" {
   interface Scene {
-    ecsWorld?: IWorld;
+    ecsWorld?: InWorld;
   }
 }
 
 // --- Update Global Collision Handler ---
 function handleHitboxOverlap(
-    hitboxGO: Phaser.Types.Physics.Arcade.GameObjectWithBody,
-    targetGO: Phaser.Types.Physics.Arcade.GameObjectWithBody
+  hitGO: Phaser.Types.Physics.Arcade.ArcadeColliderType | Phaser.Tilemaps.Tile,
+  tarGO: Phaser.Types.Physics.Arcade.ArcadeColliderType | Phaser.Tilemaps.Tile
 ) {
-    const world = hitboxGO.scene.ecsWorld;
-    if (!world) return;
+  const hitboxGO = hitGO as Phaser.Types.Physics.Arcade.GameObjectWithBody;
+  const targetGO = tarGO as Phaser.Types.Physics.Arcade.GameObjectWithBody;
 
-    let hitboxEid: number | undefined;
-    let targetEid: number | undefined;
+  const world = hitboxGO.scene.ecsWorld; // Assumes world is attached to scene
+  if (!world) return;
 
-    // ... (Find hitboxEid and targetEid as before, potentially using setData optimisation) ...
-     const physicsEntities = defineQuery([PhysicsBody])(world);
-     for (const eid of physicsEntities) {
-          const bodyId = PhysicsBody.bodyId[eid];
-          const body = getPhysicsBody(bodyId);
-          // Check if eid is already set via setData for performance
-          const goEid = body?.gameObject?.getData('eid');
-          if (goEid !== undefined) {
-              if (body?.gameObject === hitboxGO) hitboxEid = goEid;
-              if (body?.gameObject === targetGO) targetEid = goEid;
-          } else { // Fallback to checking body reference (less ideal)
-              if (body?.gameObject === hitboxGO) hitboxEid = eid;
-              if (body?.gameObject === targetGO) targetEid = eid;
-          }
-          if (hitboxEid !== undefined && targetEid !== undefined) break;
-     }
+  // --- Use getData for efficient EID lookup ---
+  const hitboxEid = hitboxGO.getData('eid') as number | undefined;
+  const targetEid = targetGO.getData('eid') as number | undefined;
 
+  if (hitboxEid === undefined || targetEid === undefined || hitboxEid === targetEid) {
+      // console.warn(`Collision: Missing EID on GO or self-collision`, hitboxGO, targetGO);
+      return;
+  }
 
-    if (hitboxEid === undefined || targetEid === undefined) return;
+  // Check if hitbox component still exists (it might be expiring this frame)
+  if (!hasComponent(world, Hitbox, hitboxEid)) return;
 
-    // --- Use the External Registry ---
-    if (!hasComponent(world, Hitbox, hitboxEid)) return; // Check if hitbox component still exists
+  // Get or create the hit set for this specific hitbox instance
+  let hitSet = hitboxHitRegistry.get(hitboxEid);
+  if (!hitSet) {
+      hitSet = new Set<number>();
+      hitboxHitRegistry.set(hitboxEid, hitSet);
+  }
 
-    // Get or create the hit set for this hitbox instance
-    let hitSet = hitboxHitRegistry.get(hitboxEid);
-    if (!hitSet) {
-        hitSet = new Set<number>();
-        hitboxHitRegistry.set(hitboxEid, hitSet);
-    }
+  const maxHits = Hitbox.maxHits[hitboxEid];
+  if (hitSet.size >= maxHits) return; // Max hits reached
+  if (hitSet.has(targetEid)) return;  // Already hit this target with this hitbox
 
-    // Check max hits if needed (using Hitbox.maxHits[hitboxEid])
-    const maxHits = Hitbox.maxHits[hitboxEid];
-    if (hitSet.size >= maxHits) {
-        // console.log(`Hitbox ${hitboxEid} already reached max hits (${maxHits})`);
-        return; // Max hits reached for this hitbox instance
-    }
+  // --- Process the Hit ---
+  console.log(`Collision: Hitbox EID ${hitboxEid} hit Target EID ${targetEid}`);
+  hitSet.add(targetEid);
 
-    // Check if target already hit by this instance
-    if (hitSet.has(targetEid)) {
-        // console.log(`Hitbox ${hitboxEid} already hit target ${targetEid}`);
-        return; // Already hit
-    }
-
-    // --- Process the Hit ---
-    console.log(`Collision: Hitbox ${hitboxEid} hit Target ${targetEid} (Registry Check Passed)`);
-
-    // Add target to the set for this hitbox instance
-    hitSet.add(targetEid);
-
-    // Add TakeDamage component to the target
-    if (!hasComponent(world, TakeDamage, targetEid)) {
-        addComponent(world, TakeDamage, targetEid);
-        TakeDamage.amount[targetEid] = 10; // Placeholder damage
-        TakeDamage.sourceEid[targetEid] = Hitbox.ownerEid[hitboxEid];
-        console.log(`Collision: Added TakeDamage component to target ${targetEid}`);
-    }
+  // Add TakeDamage component to the target if it doesn't have it already
+  if (hasComponent(world, Health, targetEid) && !hasComponent(world, TakeDamage, targetEid)) {
+      addComponent(world, TakeDamage, targetEid);
+      // TODO: Get damage from technique/weapon data associated with the hitbox owner
+      TakeDamage.amount[targetEid] = 15; // Example damage
+      TakeDamage.sourceEid[targetEid] = Hitbox.ownerEid[hitboxEid];
+      console.log(`Collision: Added TakeDamage to Target EID ${targetEid}`);
+  }
 }

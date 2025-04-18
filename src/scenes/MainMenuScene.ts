@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import * as AssetKeys from '@/constants/assets';
 
 export default class MainMenuScene extends Phaser.Scene {
     constructor() {
@@ -33,8 +34,8 @@ export default class MainMenuScene extends Phaser.Scene {
         startButton.on('pointerdown', () => {
             console.log('Starting game...');
             // TDD 2.3: Start GameScene and launch UIScene in parallel
-            this.scene.start('GameScene'); // Start the main game scene
-            this.scene.launch('UIScene'); // Launch the UI scene to run alongside
+            this.scene.start(AssetKeys.Scenes.GAME); // Start the main game scene
+            this.scene.launch(AssetKeys.Scenes.UI); // Launch the UI scene to run alongside
         });
 
         // Add other buttons (Load Game, Options, Exit) later

@@ -1,4 +1,5 @@
 import Phaser from 'phaser';
+import * as AssetKeys from '@/constants/assets';
 
 export default class PreloadScene extends Phaser.Scene {
     constructor() {
@@ -51,7 +52,7 @@ export default class PreloadScene extends Phaser.Scene {
             loadingText.destroy();
             percentText.destroy();
             assetText.destroy();
-            this.scene.start('MainMenuScene'); // Or initial game scene if skipping menu
+            this.scene.start(AssetKeys.Scenes.MAIN_MENU); // Or initial game scene if skipping menu
         });
 
         // --- Load Essential Global Assets (TDD 2.6) ---
