@@ -28,6 +28,7 @@ export interface PlayerState {
   completedQuests: Set<QuestID>;
 
   // --- Actions ---
+  setActiveTechnique: (slotIndex: number, techniqueId: TechniqueID | null) => void;
   setCoreStats: (stats: Partial<IPlayerCoreStats>) => void;
   takeDamage: (amount: number) => void;
   consumeQi: (amount: number) => boolean; // Returns true if successful
@@ -38,7 +39,6 @@ export interface PlayerState {
 }
 
 export const usePlayerStore = create<PlayerState>((set, get) => ({
-  // --- Initial State ---
   coreStats: {
     health: { current: 100, max: 100 }, // Initial values
     qi: { current: 50, max: 50 },
@@ -57,8 +57,8 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
     comprehension: new Map(),
     discovered: new Set(),
   },
-  learnedTechniques: new Set(),
-  activeTechniques: [null, null, null, null], // Example: 4 active slots
+  learnedTechniques: new Set(['tech_fireball']),
+  activeTechniques: ['tech_fireball', null, null, null], // Example: 4 active slots
   inventory: new Map(),
   equipment: { weapon: null, armor: null, accessory: null }, // Example slots
   factionReputation: new Map(),
@@ -119,6 +119,15 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   learnTechnique: (id) => set((state) => ({
       learnedTechniques: new Set(state.learnedTechniques).add(id)
   })),
+
+  setActiveTechnique: (slotIndex, techniqueId) => set((state) => {
+    if (slotIndex < 0 || slotIndex >= state.activeTechniques.length) return {}; // Invalid slot
+    if (techniqueId && !state.learnedTechniques.has(techniqueId)) return {}; // Trying to equip unlearned technique
+
+    const newActiveTechniques = [...state.activeTechniques];
+    newActiveTechniques[slotIndex] = techniqueId;
+    return { activeTechniques: newActiveTechniques };
+}),
 
   // Implement other actions...
 }));

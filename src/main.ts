@@ -4,10 +4,13 @@ import MainMenuScene from '@/scenes/MainMenuScene';
 import GameScene from '@/scenes/GameScene';
 import UIScene from '@/ui/UIScene'; // Correct path for UIScene
 
+import RexUIPlugin from 'phaser3-rex-plugins/templates/ui/ui-plugin'; 
+
+
 const config: Phaser.Types.Core.GameConfig = {
     type: Phaser.AUTO, // Use WebGL if available, otherwise Canvas
-    width: 1280, // Example resolution
-    height: 720,
+    width: 1920, // Example resolution
+    height: 1080,
     parent: 'game-container', // Matches div id in index.html
     backgroundColor: '#000000',
     physics: {
@@ -16,6 +19,13 @@ const config: Phaser.Types.Core.GameConfig = {
             gravity: { x: 0, y: 0 }, // TDD 4.4: Top-down/side-view combat likely needs 0 or low gravity initially
             debug: import.meta.env.DEV, // TDD 11.4: Enable debug drawing in development
         },
+    },
+    plugins: {
+        scene: [{
+            key: 'RexUI',
+            plugin: RexUIPlugin,
+            mapping: 'rexUI'
+        }]
     },
     scale: {
         mode: Phaser.Scale.FIT, // TDD 8.5: Example scaling mode (FIT or RESIZE)

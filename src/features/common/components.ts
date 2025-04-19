@@ -20,6 +20,9 @@ export const InputState = defineComponent({
     interact: Types.ui8,
     openMenu: Types.ui8,
     technique1: Types.ui8,
+    technique2: Types.ui8,
+    technique3: Types.ui8,
+    technique4: Types.ui8,
     sprint: Types.ui8,
     // Add other techniques/actions
 }, MAX_ENTITIES);
@@ -77,6 +80,20 @@ export const CombatState = defineComponent({
     canMove: Types.ui8,   // Flag to restrict movement during certain actions
 }, MAX_ENTITIES);
 
+export const AIState = defineComponent({
+    // Current state enum/number (e.g., 0: Idle, 1: Chasing, 2: Attacking, 3: Fleeing, 4: Staggered?)
+    currentState: Types.ui8,
+    // Timer for current state or action
+    stateDurationMs: Types.f32,
+    // Target entity ID (if chasing or attacking)
+    targetEid: Types.eid, // Store the player's entity ID here
+    // Perception/Detection range
+    perceptionRadiusSq: Types.f32, // Use squared distance for cheaper checks
+    attackRadiusSq: Types.f32,
+    // Cooldowns specific to AI actions
+    actionCooldownMs: Types.f32,
+}, MAX_ENTITIES);
+
 // Component for temporary hitboxes spawned during attacks
 export const Hitbox = defineComponent({
     ownerEid: Types.eid, // Entity that owns/spawned this hitbox
@@ -101,6 +118,7 @@ export const TakeDamage = defineComponent({
 // Component for tracking cooldowns (e.g., for attacks, abilities)
 export const Cooldown = defineComponent({
     attackLightMs: Types.f32, // Remaining cooldown time
+    attackHeavyMs: Types.f32,
     dodgeMs: Types.f32,
     // Add more cooldowns as needed
 }, MAX_ENTITIES);
@@ -110,6 +128,35 @@ export const Enemy = defineComponent({
     archetypeId: Types.ui16, // Link back to config data
 }, MAX_ENTITIES);
 
+// --- ECS Components ---
+// Add a component to manage technique cooldowns specifically
+export const TechniqueCooldowns = defineComponent({
+    // Store remaining cooldown time in milliseconds, keyed by TechniqueID (or slot index?)
+    // Using a dynamic structure within ECS is harder. Let's track active slot cooldowns.
+    slot0Ms: Types.f32,
+    slot1Ms: Types.f32,
+    slot2Ms: Types.f32,
+    slot3Ms: Types.f32,
+    // Add more slots if needed
+}, MAX_ENTITIES);
+
+// Component to indicate a technique is currently being cast (prevents other actions)
+export const Casting = defineComponent({
+    techniqueId: Types.ui16, // Map back to string TechniqueID
+    castDurationMs: Types.f32, // How long the casting animation/lock takes
+    effectTriggered: Types.ui8, // Flag: Has the effect logic run yet?
+}, MAX_ENTITIES);
+
+
+
+export enum EnemyAIState {
+    Idle = 0,
+    Patrolling = 1, // Add later
+    Chasing = 2,
+    Attacking = 3,
+    Fleeing = 4, // Add later
+    Staggered = 5 // Could reuse CombatState.isStaggered
+}
 
  
 
@@ -122,6 +169,9 @@ let nextSpriteKeyId = 0;
 let nextAnimationKeyId = 0;
 const physicsBodyMap = new Map<number, Phaser.Physics.Arcade.Body>();
 let nextPhysicsBodyId = 1;
+const techniqueKeyMap = new Map<string, number>();
+let nextTechniqueKeyId = 0;
+
 
 
 
@@ -166,4 +216,19 @@ export function getPhysicsBody(id: number): Phaser.Physics.Arcade.Body | undefin
 
 export function removePhysicsBody(id: number): void {
     physicsBodyMap.delete(id);
+}
+
+
+export function getTechniqueKeyId(key: string): number {
+    if (!techniqueKeyMap.has(key)) {
+        techniqueKeyMap.set(key, nextTechniqueKeyId++);
+    }
+    return techniqueKeyMap.get(key)!;
+}
+
+export function getTechniqueKeyById(id: number): string | undefined {
+    for (const [key, value] of techniqueKeyMap.entries()) {
+        if (value === id) return key;
+    }
+    return undefined;
 }

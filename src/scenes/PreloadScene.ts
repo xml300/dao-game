@@ -1,9 +1,10 @@
 import Phaser from 'phaser';
+import RexUIPlugin from "phaser3-rex-plugins/templates/ui/ui-plugin.js";
 import * as AssetKeys from '@/constants/assets';
 
 export default class PreloadScene extends Phaser.Scene {
     constructor() {
-        super('PreloadScene');
+        super(AssetKeys.Scenes.PRELOAD);
     }
 
     preload() {
@@ -68,7 +69,7 @@ export default class PreloadScene extends Phaser.Scene {
 
         // Load RexUI plugin if used globally (or load in UIScene if only used there)
         // Assuming RexUI is imported correctly - check RexUI docs for setup
-         // this.load.plugin('rexuiplugin', 'path/to/rexuiplugin.min.js', true); // Check RexUI docs for correct loading
+        // this.load.plugin('rexUI', RexUIPlugin, true); // Check RexUI docs for correct loading
 
 
     }
