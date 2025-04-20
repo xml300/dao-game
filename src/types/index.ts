@@ -100,8 +100,13 @@ export type ItemID = string;
 export type FactionID = string;
 export type QuestID = string;
 
-export type TechniqueEffectType = 'Projectile' | 'AoE' | 'Buff' | 'Debuff' | 'Barrier' | 'Movement';
-
+export type TechniqueEffectType =
+  | "Projectile"
+  | "AoE"
+  | "Buff"
+  | "Debuff"
+  | "Barrier"
+  | "Movement";
 
 // Placeholder for Combat Component Types (TDD 2.5, Appendix 13.1)
 // Will be defined properly when implementing combat features
@@ -132,23 +137,37 @@ export interface PhysicsBody {
 
 // Basic structure for defining techniques (load from JSON/config later)
 export interface ITechniqueData {
-    id: TechniqueID;
-    name: string;
-    description: string;
-    qiCost: number;
-    cooldown: number; // In seconds
-    animationKey?: string; // Animation to play on cast
-    effectType: TechniqueEffectType;
-    effectData: any; // Specific data based on effectType
-    // Example effectData structures:
-    // Projectile: { key: string, speed: number, damage: number, hitboxW: number, hitboxH: number, lifespanMs: number, statusEffect?: StatusEffectData }
-    // AoE: { radius: number, damage: number, durationMs: number, visualEffectKey?: string, statusEffect?: StatusEffectData }
-    // Buff: { stat: string, amount: number, durationMs: number, visualEffectKey?: string }
-    // Movement: { type: 'Blink' | 'Dash', distance?: number, speed?: number }
-    requiredDao?: { type: DaoType; level: number }; // TDD 5.3.3
-    requiredRealm?: CultivationRealm; // TDD 5.1.3
+  id: TechniqueID;
+  name: string;
+  description: string;
+  qiCost: number;
+  cooldown: number; // In seconds
+  animationKey?: string; // Animation to play on cast
+  effectType: TechniqueEffectType;
+  effectData: any; // Specific data based on effectType
+  // Example effectData structures:
+  // Projectile: { key: string, speed: number, damage: number, hitboxW: number, hitboxH: number, lifespanMs: number, statusEffect?: StatusEffectData }
+  // AoE: { radius: number, damage: number, durationMs: number, visualEffectKey?: string, statusEffect?: StatusEffectData }
+  // Buff: { stat: string, amount: number, durationMs: number, visualEffectKey?: string }
+  // Movement: { type: 'Blink' | 'Dash', distance?: number, speed?: number }
+  requiredDao?: { type: DaoType; level: number }; // TDD 5.3.3
+  requiredRealm?: CultivationRealm; // TDD 5.1.3
 }
 
+export interface ISoulAspects {
+  resilience: number;
+  perception: number;
+  affinity: number;
+  purity: number;
+}
+
+export type SoulAspectType = keyof ISoulAspects; // 'resilience' | 'perception' | 'affinity' | 'purity'
+
+
+export interface IDaoProgress {
+  comprehension: Map<DaoType, number>; // Level or percentage
+  discovered: Set<DaoType>;
+}
 
 export interface InWorld extends IWorld {
   resources: SystemResources;

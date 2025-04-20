@@ -38,12 +38,14 @@ import {
   TechniqueCooldowns,
 } from "./components";
 import { usePlayerStore } from "@/state/player.store";
-import { CultivationRealm, InWorld } from "@/types";
+import { CultivationRealm, DaoType, InWorld } from "@/types";
 import * as AssetKeys from "@/constants/assets"; // Import constants
 import GameScene from "@/scenes/GameScene";
 import { TechniqueRegistry } from "@/config/technique";
 
 import EasyStar from "easystarjs";
+import { calculateRegenRates } from "@/config/realms";
+import { DAO_PASSIVE_FACTORS } from "@/config/progression";
 
 // --- System Inputs/Resources ---
 // Define interfaces for resources systems need, like Phaser scene or input manager
@@ -123,11 +125,11 @@ export function resourceRegenSystem(world: InWorld) {
   if (regenTimer >= REGEN_INTERVAL_MS) {
     const elapsedSeconds = regenTimer / 1000.0; // Get the actual time passed for accurate rates
     const entities = resourceRegenQuery(world);
+    const playerState = usePlayerStore.getState(); 
 
-    // --- Define base rates (TDD 3.3 - initially hardcoded) ---
-    // TODO: Get these from player realm/aspects/buffs later
-    const BASE_QI_REGEN_PER_SEC = 1.5; // Example value
-    const BASE_STAMINA_REGEN_PER_SEC = 10.0; // Example value
+    const { qiRegen, staminaRegen } = calculateRegenRates(playerState.realm, playerState.soulAspects);
+    const finalQiRegen = qiRegen; // Using base calc for now
+    const finalStaminaRegen = staminaRegen;
 
     for (const eid of entities) {
       // Basic check: Don't regenerate if dead
@@ -137,12 +139,12 @@ export function resourceRegenSystem(world: InWorld) {
       let staminaChanged = false;
 
       // Calculate amounts to regenerate for this interval
-      const qiToRegen = BASE_QI_REGEN_PER_SEC * elapsedSeconds;
-      const staminaToRegen = BASE_STAMINA_REGEN_PER_SEC * elapsedSeconds;
+      const qiToRegen = finalQiRegen * elapsedSeconds;
+      const staminaToRegen = finalStaminaRegen * elapsedSeconds;
 
-      // --- Qi Regeneration ---
+      // Qi Regeneration
       const currentQi = QiPool.current[eid];
-      const maxQi = QiPool.max[eid];
+      const maxQi = QiPool.max[eid];  
       if (currentQi < maxQi) {
         const newQi = Math.min(maxQi, currentQi + qiToRegen);
         if (newQi !== currentQi) {
@@ -500,6 +502,7 @@ export function inputSystem(world: InWorld) {
   );
   const keyQ = scene.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
   const keyE = scene.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.E);
+  const keyP = scene.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.P);
 
   const entities = playerInputQuery(world); // Use existing query, ensure it includes CombatState or add it
 
@@ -517,6 +520,11 @@ export function inputSystem(world: InWorld) {
     InputState.toggleFlight[eid] = 0;
     InputState.blink[eid] = 0;
 
+    if(Phaser.Input.Keyboard.JustDown(keyP!)){
+      const progressAmount = 15; // Example fixed amount
+      console.log(`DamageSystem: Granting ${progressAmount} Realm Progress for killing Enemy ${eid}`);
+      usePlayerStore.getState().addRealmProgress(progressAmount);
+    }
     if (Phaser.Input.Keyboard.JustDown(key1!)) {
       InputState.technique1[eid] = 1; // Using technique1 field for slot 0 (index 0)
       console.log("Input: Key 1 pressed");
@@ -1379,30 +1387,104 @@ export function hitboxSystem(world: InWorld) {
   }
 }
 
+// --- Conceptual calculateDamage Function (Helper for damageSystem) ---
+function calculateDamage(
+  attackerEid: number,
+  defenderEid: number,
+  baseDamage: number,
+  isTechnique: boolean, // Flag if damage is from a technique
+  techniqueDaoType: DaoType | null, // Optional: Dao type of the technique used
+  world: InWorld
+): number {
+  let finalDamage = baseDamage;
+  let mitigation = 0;
+  const attackerIsPlayer = hasComponent(world, PlayerControlled, attackerEid);
+  const defenderIsPlayer = hasComponent(world, PlayerControlled, defenderEid);
+  const playerState = usePlayerStore.getState(); // Get latest player state
+
+  // 1. Defender Mitigation (Resilience)
+  if (defenderIsPlayer) {
+      const resilienceLevel = playerState.soulAspects.resilience;
+      const resilienceDefenseFactor = 0.05; // Example: 5% reduction per point
+      mitigation += resilienceLevel * resilienceDefenseFactor;
+  } else {
+      // TODO: Get enemy base defense/resilience
+  }
+  // Apply Dao specific defense? e.g., Earth Dao reduces physical damage taken?
+
+  // 2. Attacker Bonuses
+  if (attackerIsPlayer) {
+      // Affinity (for techniques)
+      if (isTechnique) {
+          const affinityLevel = playerState.soulAspects.affinity;
+          const affinityPowerFactor = 1.0 + (affinityLevel * 0.08); // Example: +8% technique power
+          finalDamage *= affinityPowerFactor;
+      }
+
+      // Dao Bonuses (e.g., Sword Dao for basic/sword attacks)
+      const swordComprehension = playerState.daoProgress.comprehension.get(DaoType.Sword) || 0;
+      // Need to know if attack was physical/sword type
+      // Assuming for now basic attacks benefit:
+      if (!isTechnique) { // Apply to basic attacks?
+           finalDamage *= (1.0 + swordComprehension * DAO_PASSIVE_FACTORS.SWORD_DAMAGE_PER_LEVEL);
+      } else if (techniqueDaoType === DaoType.Sword) { // Apply to Sword techniques
+           finalDamage *= (1.0 + swordComprehension * DAO_PASSIVE_FACTORS.SWORD_DAMAGE_PER_LEVEL);
+      }
+      // Add checks for other Daos affecting damage (e.g., Fire Dao adding burn is separate, in status effect logic)
+
+      // Crits (Perception)
+      const perceptionLevel = playerState.soulAspects.perception;
+      const critChanceFactor = 0.02;
+      const critDamageFactor = 0.1;
+      const critChance = perceptionLevel * critChanceFactor;
+      if (Math.random() < critChance) {
+           const critMultiplier = 1.5 + (perceptionLevel * critDamageFactor);
+           finalDamage *= critMultiplier;
+           console.log("Player CRITICAL HIT!");
+           // TODO: Add visual effect trigger
+      }
+
+  } else {
+      // TODO: Get enemy attacker bonuses (base stats, maybe simplified Dao effects)
+  }
+
+  // 3. Apply Mitigation
+  mitigation = Math.min(0.95, Math.max(0, mitigation)); // Cap mitigation
+  finalDamage *= (1.0 - mitigation);
+
+  // 4. Final Clamping
+  return Math.max(1, Math.round(finalDamage));
+}
+
 // --- NEW: Damage System (Applies damage from TakeDamage component) ---
 export function damageSystem(world: InWorld) {
   const entities = damageQuery(world);
   const playerEntities = playerQuery(world); // Need this to find the player EID easily
-
-  let playerEid = -1;
-  if (playerEntities.length > 0) {
-    playerEid = playerEntities[0]; // Assuming single player
-  }
+  const playerEid = playerEntities.length > 0 ? playerEntities[0] : -1;
 
   const STAGGER_DURATION_MS = 250; // Duration of stagger effect (tune later)
   const MIN_DAMAGE_TO_STAGGER = 5; // Only stagger if damage is significant (tune later)
 
+
   for (const eid of entities) {
     if (
       !hasComponent(world, Health, eid) ||
-      !hasComponent(world, CombatState, eid)
+      !hasComponent(world, TakeDamage, eid)
     ) {
-      removeComponent(world, TakeDamage, eid); // Clean up component if entity state is invalid
+      if (hasComponent(world, TakeDamage, eid)) removeComponent(world, TakeDamage, eid);
       continue;
     }
 
     const damageAmount = TakeDamage.amount[eid];
-    Health.current[eid] = Math.max(0, Health.current[eid] - damageAmount);
+    const sourceEid = TakeDamage.sourceEid[eid];
+    // TODO: Determine if damage was from a technique and its Dao type
+    const isFromTechnique = false; // Placeholder
+    const techniqueDao = null;     // Placeholder
+
+    // Calculate final damage using the helper
+    const finalDamage = calculateDamage(sourceEid, eid, damageAmount, isFromTechnique, techniqueDao, world);
+
+    Health.current[eid] = Math.max(0, Health.current[eid] - finalDamage)
 
     console.log(
       `DamageSystem: Entity ${eid} took ${damageAmount} damage. New health: ${Health.current[eid]}/${Health.max[eid]}`
@@ -1469,6 +1551,14 @@ export function damageSystem(world: InWorld) {
       );
     }
 
+    if (Health.current[eid] === 0 && hasComponent(world, Enemy, eid) && sourceEid === playerEid) {
+      const progressAmount = 15; // Example fixed amount
+      console.log(`DamageSystem: Granting ${progressAmount} Realm Progress for killing Enemy ${eid}`);
+      usePlayerStore.getState().addRealmProgress(progressAmount);
+      // Potentially discover/gain comprehension for specific enemy types
+      // Example: if (Enemy.archetypeId[eid] === FIRE_SLIME_ID) { discoverDao(DaoType.Fire); }
+  }
+
     // Remove TakeDamage component after processing
     removeComponent(world, TakeDamage, eid);
   }
@@ -1480,6 +1570,8 @@ export function movementSystem(world: InWorld) {
   const speed = 200; // Base speed, move to config/component later
   const sprintMultiplier = 1.5; // Example sprint speed increase
   const DODGE_SPEED_BURST = 450; // Faster than sprint
+  const playerState = usePlayerStore.getState(); // Get state for Dao checks
+
 
   // --- Sync Physics Body Position back to ECS Position ---
   // Necessary because Arcade Physics updates the body directly
@@ -1510,6 +1602,14 @@ export function movementSystem(world: InWorld) {
     const isDodging = CombatState.isDodging[eid] === 1; // Check dodge state
     let isFlying = MovementState.isFlying[eid] === 1;
     const blinkOnCooldown = Cooldown.blinkMs[eid] > 0;
+    let blinkCost = BLINK_STAMINA_COST;
+    let blinkCooldown = BLINK_COOLDOWN_MS;
+
+    const spaceComprehension = playerState.daoProgress.comprehension.get(DaoType.Space) || 0;
+    blinkCost *= (1.0 - spaceComprehension * DAO_PASSIVE_FACTORS.SPACE_BLINK_COST_REDUCTION_PER_LEVEL);
+    blinkCooldown *= (1.0 - spaceComprehension * 0.005); // Example: 0.5% cooldown reduction per point
+    blinkCost = Math.max(5, Math.round(blinkCost)); // Minimum cost
+    blinkCooldown = Math.max(200, blinkCooldown); // Minimum cooldown
 
     // Add this log:
     if (inputX !== 0 || inputY !== 0) {
@@ -1527,7 +1627,7 @@ export function movementSystem(world: InWorld) {
       !isFlying /* Optional: disable blink while flying? */
     ) {
       const currentStamina = StaminaPool.current[eid];
-      if (currentStamina >= BLINK_STAMINA_COST) {
+      if (currentStamina >= blinkCost) {
         // Determine Blink Direction
         let blinkDirX = inputX;
         let blinkDirY = inputY;
@@ -1582,11 +1682,11 @@ export function movementSystem(world: InWorld) {
             )}, ${targetY.toFixed(0)})`
           );
           // Consume Stamina
-          StaminaPool.current[eid] = currentStamina - BLINK_STAMINA_COST;
-          usePlayerStore.getState().consumeStamina(BLINK_STAMINA_COST);
+          StaminaPool.current[eid] = currentStamina - blinkCost;
+          usePlayerStore.getState().consumeStamina(blinkCost);
 
           // Set Cooldown
-          Cooldown.blinkMs[eid] = BLINK_COOLDOWN_MS;
+          Cooldown.blinkMs[eid] = blinkCooldown;
 
           // --- Perform Blink ---
           // Use body.reset to instantly move physics body AND sprite placeholder

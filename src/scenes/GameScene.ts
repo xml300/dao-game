@@ -90,7 +90,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   create() {
-    const { width, height } = this.scale;
+    // const { width, height } = this.scale;
     console.log("GameScene started");
     aiPathMap.clear();
 
@@ -132,6 +132,8 @@ export default class GameScene extends Phaser.Scene {
     this.easystar = new EasyStar.js();
     const grid: number[][] = [];
     const acceptableTiles: number[] = [];
+
+    console.log(1, this.map.width, this.map.height);
 
     // Create grid and identify walkable tiles
     for (let y = 0; y < this.map.height; y++) {
