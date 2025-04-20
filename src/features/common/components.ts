@@ -24,6 +24,8 @@ export const InputState = defineComponent({
     technique3: Types.ui8,
     technique4: Types.ui8,
     sprint: Types.ui8,
+    toggleFlight: Types.ui8,
+    blink: Types.ui8,
     // Add other techniques/actions
 }, MAX_ENTITIES);
 
@@ -81,17 +83,16 @@ export const CombatState = defineComponent({
 }, MAX_ENTITIES);
 
 export const AIState = defineComponent({
-    // Current state enum/number (e.g., 0: Idle, 1: Chasing, 2: Attacking, 3: Fleeing, 4: Staggered?)
     currentState: Types.ui8,
-    // Timer for current state or action
     stateDurationMs: Types.f32,
-    // Target entity ID (if chasing or attacking)
-    targetEid: Types.eid, // Store the player's entity ID here
-    // Perception/Detection range
-    perceptionRadiusSq: Types.f32, // Use squared distance for cheaper checks
+    targetEid: Types.eid,
+    perceptionRadiusSq: Types.f32,
     attackRadiusSq: Types.f32,
-    // Cooldowns specific to AI actions
     actionCooldownMs: Types.f32,
+    isCalculatingPath: Types.ui8, // Flag: 1 if findPath called, 0 otherwise
+    currentPathIndex: Types.i16, // Index in the current path (-1 if no path)
+    lastTargetTileX: Types.i16,  // Store last known target tile to avoid recalc
+    lastTargetTileY: Types.i16,
 }, MAX_ENTITIES);
 
 // Component for temporary hitboxes spawned during attacks
@@ -120,6 +121,7 @@ export const Cooldown = defineComponent({
     attackLightMs: Types.f32, // Remaining cooldown time
     attackHeavyMs: Types.f32,
     dodgeMs: Types.f32,
+    blinkMs: Types.f32,
     // Add more cooldowns as needed
 }, MAX_ENTITIES);
 

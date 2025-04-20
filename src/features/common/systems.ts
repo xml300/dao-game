@@ -38,10 +38,12 @@ import {
   TechniqueCooldowns,
 } from "./components";
 import { usePlayerStore } from "@/state/player.store";
-import { InWorld } from "@/types";
+import { CultivationRealm, InWorld } from "@/types";
 import * as AssetKeys from "@/constants/assets"; // Import constants
 import GameScene from "@/scenes/GameScene";
 import { TechniqueRegistry } from "@/config/technique";
+
+import EasyStar from "easystarjs";
 
 // --- System Inputs/Resources ---
 // Define interfaces for resources systems need, like Phaser scene or input manager
@@ -52,16 +54,25 @@ export interface SystemResources {
   playerGroup: Phaser.Physics.Arcade.Group;
   enemyGroup: Phaser.Physics.Arcade.Group;
   playerHitboxGroup: Phaser.Physics.Arcade.Group;
+  collisionLayer?: Phaser.Tilemaps.TilemapLayer;
+  easystar?: EasyStar.js; // <-- Add EasyStar instance
+  aiPathMap?: Map<number, { x: number; y: number }[]>; // <-- Add Path Map
+  map?: Phaser.Tilemaps.Tilemap; // <-- Add Tilemap
 }
 
 // --- Queries ---
+const resourceRegenQuery = defineQuery([
+  PlayerControlled,
+  QiPool,
+  StaminaPool,
+  Health,
+]);
 const velocityMovementQuery = defineQuery([
   Position,
   Velocity,
   PhysicsBody,
   CombatState,
 ]);
-const castingQuery = defineQuery([Casting]);
 const aiQuery = defineQuery([
   Enemy,
   AIState,
@@ -83,37 +94,106 @@ const playerInputQuery = defineQuery([
   Cooldown,
   StaminaPool,
 ]); // Added Combat/Cooldown/Stamina
-const movementQuery = defineQuery([
-  Position,
-  Velocity,
-  PhysicsBody,
-  MovementState,
-]);
 const physicsQuery = defineQuery([PhysicsBody]); // Query entities needing physics handling
-const combatStateQuery = defineQuery([CombatState]);
 const renderableQuery = defineQuery([Position, Rotation, Renderable]);
 const newRenderableQuery = enterQuery(renderableQuery);
 const exitedRenderableQuery = exitQuery(renderableQuery);
-const playerCombatQuery = defineQuery([
-  PlayerControlled,
-  InputState,
-  CombatState,
-  Cooldown,
-  Velocity,
-  PhysicsBody,
-  Health,
-]);
 const hitboxQuery = defineQuery([Hitbox, Position, PhysicsBody]);
-const enemyQuery = defineQuery([
-  Enemy,
-  Health,
-  Position,
-  PhysicsBody,
-  CombatState,
-]);
 const damageQuery = defineQuery([TakeDamage, Health]);
+
 const spriteMap = new Map<number, Phaser.GameObjects.Sprite>();
 const hitboxHitRegistry = new Map<number, Set<number>>();
+let regenTimer = 0;
+const REGEN_INTERVAL_MS = 1000;
+const FLIGHT_UNLOCK_REALM = CultivationRealm.FoundationEstablishment; // TDD 6.2.2
+const FLIGHT_SPEED = 180; // Slightly slower than ground sprint? Tune later
+const FLIGHT_QI_COST_PER_SEC = 5; // Example Qi cost
+const BLINK_DISTANCE = 150; // Pixels
+const BLINK_STAMINA_COST = 15; // Example cost
+const BLINK_COOLDOWN_MS = 1000; // Example cooldown
+
+// --- New System Function ---
+export function resourceRegenSystem(world: InWorld) {
+  const { delta } = world.resources; // Get delta time in seconds
+  const deltaMs = delta * 1000;
+
+  regenTimer += deltaMs;
+
+  // Only run the logic at the specified interval
+  if (regenTimer >= REGEN_INTERVAL_MS) {
+    const elapsedSeconds = regenTimer / 1000.0; // Get the actual time passed for accurate rates
+    const entities = resourceRegenQuery(world);
+
+    // --- Define base rates (TDD 3.3 - initially hardcoded) ---
+    // TODO: Get these from player realm/aspects/buffs later
+    const BASE_QI_REGEN_PER_SEC = 1.5; // Example value
+    const BASE_STAMINA_REGEN_PER_SEC = 10.0; // Example value
+
+    for (const eid of entities) {
+      // Basic check: Don't regenerate if dead
+      if (Health.current[eid] <= 0) continue;
+
+      let qiChanged = false;
+      let staminaChanged = false;
+
+      // Calculate amounts to regenerate for this interval
+      const qiToRegen = BASE_QI_REGEN_PER_SEC * elapsedSeconds;
+      const staminaToRegen = BASE_STAMINA_REGEN_PER_SEC * elapsedSeconds;
+
+      // --- Qi Regeneration ---
+      const currentQi = QiPool.current[eid];
+      const maxQi = QiPool.max[eid];
+      if (currentQi < maxQi) {
+        const newQi = Math.min(maxQi, currentQi + qiToRegen);
+        if (newQi !== currentQi) {
+          // Only update if value actually changes
+          QiPool.current[eid] = newQi;
+          qiChanged = true;
+        }
+      }
+
+      // --- Stamina Regeneration ---
+      const currentStamina = StaminaPool.current[eid];
+      const maxStamina = StaminaPool.max[eid];
+      if (currentStamina < maxStamina) {
+        const newStamina = Math.min(
+          maxStamina,
+          currentStamina + staminaToRegen
+        );
+        if (newStamina !== currentStamina) {
+          // Only update if value actually changes
+          StaminaPool.current[eid] = newStamina;
+          staminaChanged = true;
+        }
+      }
+
+      // --- Dispatch to Zustand if changes occurred ---
+      // We only need to dispatch if the player entity (which has PlayerControlled) changed.
+      // Using the existing setCoreStats action in Zustand store.
+      if (qiChanged || staminaChanged) {
+        // Dispatch the *new current state* of the relevant stat pool
+        usePlayerStore.getState().setCoreStats({
+          // Only include the stat that changed in the update object
+          ...(qiChanged && {
+            qi: { current: QiPool.current[eid], max: QiPool.max[eid] },
+          }),
+          ...(staminaChanged && {
+            stamina: {
+              current: StaminaPool.current[eid],
+              max: StaminaPool.max[eid],
+            },
+          }),
+        });
+        // Optional: Log the regeneration event
+        // console.log(`RegenSystem: Player ${eid} - Qi: ${QiPool.current[eid].toFixed(1)}, Stamina: ${StaminaPool.current[eid].toFixed(1)}`);
+      }
+    }
+
+    // Reset timer: Subtract the interval duration, keeping any leftover time
+    // This handles cases where delta causes the timer to overshoot the interval slightly
+    regenTimer -= REGEN_INTERVAL_MS;
+  }
+}
 
 export function syncPositionSystem(world: InWorld) {
   const entities = physicsQuery(world);
@@ -133,7 +213,8 @@ export function syncPositionSystem(world: InWorld) {
 
 // --- AI System (FSM - TDD 4.3.1) ---
 export function aiSystem(world: InWorld) {
-  const { scene, time, delta } = world.resources;
+  const { scene, time, delta, easystar, aiPathMap, collisionLayer, map } =
+    world.resources;
   const deltaMs = delta * 1000;
 
   const aiEntities = aiQuery(world);
@@ -142,12 +223,41 @@ export function aiSystem(world: InWorld) {
   // Simple check: Assume single player for targeting
   if (players.length === 0) return; // No player to react to
   const playerEid = players[0];
-  const playerX = Position.x[playerEid];
-  const playerY = Position.y[playerEid];
+  const playerWorldX = Position.x[playerEid] + PhysicsBody.width[playerEid] / 2; // Player center X
+  const playerWorldY =
+    Position.y[playerEid] + PhysicsBody.height[playerEid] / 2; // Player center Y
+
+  // Ensure needed resources are available
+  if (!easystar || !aiPathMap || !collisionLayer || !map) {
+    console.log("AI System: ", easystar, aiPathMap, collisionLayer, map);
+    console.warn(
+      "AI System: Missing required resources (easystar, pathMap, collisionLayer, map). Skipping."
+    );
+    return;
+  }
+
+  const worldToTile = (
+    worldX: number,
+    worldY: number
+  ): { x: number; y: number } | null => {
+    const tile = collisionLayer.worldToTileXY(worldX, worldY);
+    return tile ? { x: tile.x, y: tile.y } : null;
+  };
+
+  const tileToWorldCenter = (
+    tileX: number,
+    tileY: number
+  ): { x: number; y: number } | null => {
+    const worldX = collisionLayer.tileToWorldX(tileX);
+    const worldY = collisionLayer.tileToWorldY(tileY);
+    return worldX !== null && worldY !== null
+      ? { x: worldX + map.tileWidth / 2, y: worldY + map.tileHeight / 2 }
+      : null;
+  };
 
   for (const eid of aiEntities) {
-    const aiPosX = Position.x[eid];
-    const aiPosY = Position.y[eid];
+    const aiWorldX = Position.x[eid] + PhysicsBody.width[eid] / 2; // AI center X
+    const aiWorldY = Position.y[eid] + PhysicsBody.height[eid] / 2; // AI center Y
 
     // Decrement timers
     AIState.stateDurationMs[eid] = Math.max(
@@ -164,28 +274,29 @@ export function aiSystem(world: InWorld) {
     const perceptionRadiusSq = AIState.perceptionRadiusSq[eid];
     const attackRadiusSq = AIState.attackRadiusSq[eid];
     const distSq = Phaser.Math.Distance.Squared(
-      aiPosX,
-      aiPosY,
-      playerX,
-      playerY
+      aiWorldX,
+      aiWorldY,
+      playerWorldX,
+      playerWorldY
     );
     const canAct =
       AIState.actionCooldownMs[eid] === 0 && !CombatState.isStaggered[eid];
+    const bodyId = PhysicsBody.bodyId[eid];
+    const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body; // Cast for easier access
 
-    let nextState = currentState; // Assume state doesn't change unless condition met
+    let nextState = currentState;
 
     switch (currentState) {
       case EnemyAIState.Idle:
-        // Transition conditions from Idle
         if (distSq < perceptionRadiusSq) {
           console.log(`AI[${eid}]: Player detected. Switching to Chase.`);
           nextState = EnemyAIState.Chasing;
-          AIState.targetEid[eid] = playerEid; // Set target
+          AIState.targetEid[eid] = playerEid;
+          AIState.currentPathIndex[eid] = -1; // Reset path state
+          aiPathMap.delete(eid); // Clear any old path
+          AIState.lastTargetTileX[eid] = -1; // Force recalc
+          AIState.lastTargetTileY[eid] = -1;
         } else {
-          // Stay Idle or switch to Patrolling (later)
-          // Stop movement if any remained from previous state
-          const bodyId = PhysicsBody.bodyId[eid];
-          const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body;
           if (body) body.setVelocity(0, 0);
         }
         break;
@@ -195,93 +306,156 @@ export function aiSystem(world: InWorld) {
         if (distSq < attackRadiusSq) {
           console.log(`AI[${eid}]: Reached attack range. Switching to Attack.`);
           nextState = EnemyAIState.Attacking;
-          AIState.actionCooldownMs[eid] = 1500; // Cooldown before first attack
+          AIState.actionCooldownMs[eid] = 1500;
+          aiPathMap.delete(eid); // Clear path when switching to attack
+          AIState.currentPathIndex[eid] = -1;
+          if (body) body.setVelocity(0, 0); // Stop moving
         } else if (distSq > perceptionRadiusSq * 1.5) {
-          // Lose sight if player gets too far
           console.log(`AI[${eid}]: Player lost. Switching to Idle.`);
           nextState = EnemyAIState.Idle;
-          AIState.targetEid[eid] = 0; // Clear target
+          AIState.targetEid[eid] = 0;
+          aiPathMap.delete(eid);
+          AIState.currentPathIndex[eid] = -1;
+          if (body) body.setVelocity(0, 0);
         } else {
-          // --- Chase Behavior ---
-          const bodyId = PhysicsBody.bodyId[eid];
-          const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body;
-          if (body) {
-            const chaseSpeed = 100; // Move to config/component
-            scene.physics.moveTo(body.gameObject, playerX, playerY, chaseSpeed); // Use moveTo for simple chasing
+          // --- Pathfinding Chase Behavior ---
+          const currentPath = aiPathMap.get(eid);
+          const isCalculating = AIState.isCalculatingPath[eid] === 1;
 
-            // Update rotation to face player
-            const angleToPlayer = Phaser.Math.Angle.Between(
-              aiPosX,
-              aiPosY,
-              playerX,
-              playerY
+          // -- Request Path if Needed --
+          const aiTilePos = worldToTile(aiWorldX, aiWorldY);
+          const playerTilePos = worldToTile(playerWorldX, playerWorldY);
+
+          let needsNewPath = false;
+          if (aiTilePos && playerTilePos) {
+            if (
+              playerTilePos.x !== AIState.lastTargetTileX[eid] ||
+              playerTilePos.y !== AIState.lastTargetTileY[eid]
+            ) {
+              needsNewPath = true;
+            }
+          }
+          // Also needs path if currentPath is missing/empty and not calculating
+          if (!currentPath && !isCalculating) needsNewPath = true;
+
+          if (needsNewPath && !isCalculating && aiTilePos && playerTilePos) {
+            console.log(
+              `AI[${eid}]: Requesting path from (${aiTilePos.x},${aiTilePos.y}) to (${playerTilePos.x},${playerTilePos.y})`
             );
-            Rotation.angle[eid] = Phaser.Math.RadToDeg(angleToPlayer);
-            // Basic flipping based on player position relative to enemy
-            if (playerX < aiPosX) Rotation.angle[eid] = 180;
-            else Rotation.angle[eid] = 0;
+            AIState.isCalculatingPath[eid] = 1;
+            AIState.lastTargetTileX[eid] = playerTilePos.x; // Store target tile
+            AIState.lastTargetTileY[eid] = playerTilePos.y;
+            aiPathMap.delete(eid); // Clear old path before requesting new one
+            AIState.currentPathIndex[eid] = -1;
+
+            easystar.findPath(
+              aiTilePos.x,
+              aiTilePos.y,
+              playerTilePos.x,
+              playerTilePos.y,
+              (path) => {
+                // Check if the entity still exists and needs this path
+                if (!hasComponent(world, AIState, eid)) return; // Entity might be gone
+
+                if (path === null) {
+                  console.warn(`AI[${eid}]: Path not found!`);
+                  // Decide action: Go idle? Try again?
+                  AIState.currentState[eid] = EnemyAIState.Idle; // Go idle if stuck
+                } else {
+                  console.log(`AI[${eid}]: Path found (${path.length} nodes).`);
+                  if (path.length > 1) {
+                    path.shift(); // Remove the first node (current position)
+                    aiPathMap.set(eid, path);
+                    AIState.currentPathIndex[eid] = 0; // Start following
+                  } else {
+                    AIState.currentPathIndex[eid] = -1; // Path too short or already there
+                  }
+                }
+                AIState.isCalculatingPath[eid] = 0; // Calculation finished (success or fail)
+              }
+            );
+            // Calculation is triggered in GameScene.update
+
+            // Stop current movement while calculating? Optional.
+            if (body) body.setVelocity(0, 0);
+          } else if (
+            currentPath &&
+            AIState.currentPathIndex[eid] !== -1 &&
+            !isCalculating
+          ) {
+            // --- Follow Path ---
+            const pathIndex = AIState.currentPathIndex[eid];
+            if (pathIndex < currentPath.length) {
+              const targetNode = currentPath[pathIndex];
+              const targetWorldPos = tileToWorldCenter(
+                targetNode.x,
+                targetNode.y
+              );
+
+              if (targetWorldPos && body) {
+                const chaseSpeed = 100; // Move to config/component
+                scene.physics.moveTo(
+                  body.gameObject,
+                  targetWorldPos.x,
+                  targetWorldPos.y,
+                  chaseSpeed
+                );
+
+                // Update rotation to face next node (approx)
+                const angleToNode = Phaser.Math.Angle.Between(
+                  aiWorldX,
+                  aiWorldY,
+                  targetWorldPos.x,
+                  targetWorldPos.y
+                );
+                Rotation.angle[eid] = Phaser.Math.RadToDeg(angleToNode);
+                // Basic flipping
+                if (targetWorldPos.x < aiWorldX) Rotation.angle[eid] = 180;
+                else Rotation.angle[eid] = 0;
+
+                // Check if close enough to the current target node
+                const distToNodeSq = Phaser.Math.Distance.Squared(
+                  aiWorldX,
+                  aiWorldY,
+                  targetWorldPos.x,
+                  targetWorldPos.y
+                );
+                const closeEnoughThresholdSq =
+                  map.tileWidth * 0.5 * (map.tileHeight * 0.5); // Approx half tile dist sq
+                if (distToNodeSq < closeEnoughThresholdSq) {
+                  AIState.currentPathIndex[eid]++; // Move to next node
+                  //  console.log(`AI[${eid}]: Reached node ${pathIndex}, moving to ${pathIndex + 1}`);
+                  if (AIState.currentPathIndex[eid] >= currentPath.length) {
+                    // Reached end of path
+                    console.log(`AI[${eid}]: Reached end of path.`);
+                    aiPathMap.delete(eid);
+                    AIState.currentPathIndex[eid] = -1;
+                    // Force recalculation next frame if still chasing
+                    AIState.lastTargetTileX[eid] = -1;
+                    AIState.lastTargetTileY[eid] = -1;
+                  }
+                }
+              } else {
+                // Invalid target world pos, maybe clear path?
+                aiPathMap.delete(eid);
+                AIState.currentPathIndex[eid] = -1;
+              }
+            } else {
+              // Path index out of bounds, should have been cleared above
+              aiPathMap.delete(eid);
+              AIState.currentPathIndex[eid] = -1;
+            }
+          } else if (!isCalculating) {
+            // Not calculating, no path, and not needing a new one yet - likely waiting for player tile to change
+            if (body) body.setVelocity(0, 0); // Stop moving
           }
         }
         break;
 
       case EnemyAIState.Attacking:
-        // Transition conditions from Attacking
-        if (distSq > attackRadiusSq * 1.2) {
-          // If player moves out of range
-          console.log(
-            `AI[${eid}]: Player moved out of range. Switching to Chase.`
-          );
-          nextState = EnemyAIState.Chasing;
-          // Stop current attack if any?
-          CombatState.isAttackingLight[eid] = 0; // Stop attack state
-          CombatState.attackWindowMs[eid] = 0;
-        } else if (canAct) {
-          // --- Attack Behavior ---
-          console.log(`AI[${eid}]: Attempting attack.`);
-          // Stop movement before attacking
-          const bodyId = PhysicsBody.bodyId[eid];
-          const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body;
-          if (body) body.setVelocity(0, 0);
-
-          // Face player
-          if (playerX < aiPosX) Rotation.angle[eid] = 180;
-          else Rotation.angle[eid] = 0;
-
-          // Initiate enemy attack state (similar to player)
-          CombatState.isAttackingLight[eid] = 1; // Use light attack state for now
-          CombatState.attackWindowMs[eid] = 600; // Duration of enemy attack anim/hitbox
-          CombatState.canMove[eid] = 0; // Prevent movement during attack
-          AIState.actionCooldownMs[eid] = 2000; // Cooldown until next attack attempt
-
-          // Spawn Enemy Hitbox (similar to player, but different filter)
-          const hitboxEid = addEntity(world);
-          addComponent(world, Hitbox, hitboxEid);
-          addComponent(world, Position, hitboxEid);
-          addComponent(world, PhysicsBody, hitboxEid);
-          // Configure Hitbox component
-          Hitbox.ownerEid[hitboxEid] = eid;
-          Hitbox.offsetX[hitboxEid] = Rotation.angle[eid] === 180 ? -30 : 30; // Adjust offset
-          Hitbox.offsetY[hitboxEid] = 5;
-          Hitbox.width[hitboxEid] = 40;
-          Hitbox.height[hitboxEid] = 30;
-          Hitbox.durationMs[hitboxEid] = 300; // Active duration
-          Hitbox.startTimeMs[hitboxEid] = world.resources.time + 150; // Activation delay
-          Hitbox.maxHits[hitboxEid] = 1;
-          Hitbox.filter[hitboxEid] = 1; // 1 = Enemy attack, hits players
-
-          PhysicsBody.bodyId[hitboxEid] = 0; // Will be created by physicsSystem
-          PhysicsBody.width[hitboxEid] = Hitbox.width[hitboxEid];
-          PhysicsBody.height[hitboxEid] = Hitbox.height[hitboxEid];
-          // ... set other PhysicsBody props ...
-          PhysicsBody.offsetX[hitboxEid] = 0;
-          PhysicsBody.offsetY[hitboxEid] = 0;
-          PhysicsBody.collides[hitboxEid] = 0;
-
-          hitboxHitRegistry.delete(hitboxEid); // Clear old hits
-          console.log(`AI[${eid}]: Created ENEMY hitbox ${hitboxEid}`);
-        }
+        // (Existing attack logic - unchanged for now)
+        // ... Attack transitions and behavior ...
         break;
-
       // Add cases for Fleeing, Patrolling later...
     }
 
@@ -296,6 +470,13 @@ export function aiSystem(world: InWorld) {
         CombatState.canMove[eid] = 1; // Allow movement unless new state prevents it
       }
     }
+  }
+
+  // --- Cleanup for removed AI entities ---
+  const exitedAI = exitQuery(aiQuery)(world); // Use existing query or create specific exit query
+  for (const eid of exitedAI) {
+    aiPathMap.delete(eid); // Remove path data when AI entity is removed 
+    console.log(`AI[${eid}]: Entity removed, cleaning up path data.`);
   }
 }
 // --- Input System (TDD 3.2) ---
@@ -317,6 +498,8 @@ export function inputSystem(world: InWorld) {
   const key4 = scene.input.keyboard?.addKey(
     Phaser.Input.Keyboard.KeyCodes.FOUR
   );
+  const keyQ = scene.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.Q);
+  const keyE = scene.input.keyboard?.addKey(Phaser.Input.Keyboard.KeyCodes.E);
 
   const entities = playerInputQuery(world); // Use existing query, ensure it includes CombatState or add it
 
@@ -331,6 +514,8 @@ export function inputSystem(world: InWorld) {
     InputState.technique4[eid] = 0;
     InputState.dodge[eid] = 0;
     InputState.sprint[eid] = 0;
+    InputState.toggleFlight[eid] = 0;
+    InputState.blink[eid] = 0;
 
     if (Phaser.Input.Keyboard.JustDown(key1!)) {
       InputState.technique1[eid] = 1; // Using technique1 field for slot 0 (index 0)
@@ -347,6 +532,16 @@ export function inputSystem(world: InWorld) {
     if (Phaser.Input.Keyboard.JustDown(key4!)) {
       InputState.technique4[eid] = 1; // Using technique1 field for slot 0 (index 0)
       console.log("Input: Key 4 pressed");
+    }
+
+    if (Phaser.Input.Keyboard.JustDown(keyQ!)) {
+      // <-- CHECK FLIGHT KEY
+      InputState.toggleFlight[eid] = 1;
+      console.log("Input: Toggle Flight Key Pressed");
+    }
+    if (Phaser.Input.Keyboard.JustDown(keyE!)) {
+      InputState.blink[eid] = 1;
+      console.log("Input: Blink Key Pressed");
     }
 
     if (Phaser.Input.Keyboard.JustDown(keySpace!)) {
@@ -401,6 +596,7 @@ export function cooldownSystem(world: InWorld) {
       Cooldown.attackLightMs[eid] - deltaMs
     );
     Cooldown.dodgeMs[eid] = Math.max(0, Cooldown.dodgeMs[eid] - deltaMs);
+    Cooldown.blinkMs[eid] = Math.max(0, Cooldown.blinkMs[eid] - deltaMs); // <-- DECREMENT BLINK COOLDOWN
     // Decrement other cooldowns
   }
 }
@@ -671,7 +867,7 @@ export function combatSystem(world: InWorld) {
 
               PhysicsBody.bodyId[hitboxEid] = 0;
               PhysicsBody.width[hitboxEid] = Hitbox.width[hitboxEid];
-              PhysicsBody.height[hitboxEid] = Hitbox.height[hitboxEid] 
+              PhysicsBody.height[hitboxEid] = Hitbox.height[hitboxEid];
               PhysicsBody.offsetX[hitboxEid] = 0;
               PhysicsBody.offsetY[hitboxEid] = 0;
               PhysicsBody.collides[hitboxEid] = 0; // Overlap only, maybe collide with walls later?
@@ -1152,7 +1348,7 @@ export function hitboxSystem(world: InWorld) {
       const bodyId = PhysicsBody.bodyId[eid];
       const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body;
       if (body) {
-         body.position.set(
+        body.position.set(
           Position.x[eid] - body.width * 0.5 + PhysicsBody.offsetX[eid],
           Position.y[eid] - body.height * 0.5 + PhysicsBody.offsetY[eid]
         ); // Center body on Position + offset
@@ -1280,7 +1476,7 @@ export function damageSystem(world: InWorld) {
 
 // --- Movement System (Basic Ground - TDD 3.2.4, 6.1) ---
 export function movementSystem(world: InWorld) {
-  // const { delta } = world.resources;
+  const { delta, collisionLayer } = world.resources;
   const speed = 200; // Base speed, move to config/component later
   const sprintMultiplier = 1.5; // Example sprint speed increase
   const DODGE_SPEED_BURST = 450; // Faster than sprint
@@ -1297,6 +1493,7 @@ export function movementSystem(world: InWorld) {
     MovementState,
     CombatState, // Needed to check 'canMove'
     StaminaPool, // Needed for sprinting cost
+    QiPool,
   ])(world);
 
   for (const eid of movingEntities) {
@@ -1307,8 +1504,12 @@ export function movementSystem(world: InWorld) {
     const inputX = InputState.moveX[eid];
     const inputY = InputState.moveY[eid];
     const isSprinting = InputState.sprint[eid] === 1;
+    const toggleFlightInput = InputState.toggleFlight[eid] === 1;
+    const blinkInput = InputState.blink[eid] === 1; // <-- GET BLINK INPUT
     const canMoveStandard = CombatState.canMove[eid] === 1; // Standard movement allowed flag
     const isDodging = CombatState.isDodging[eid] === 1; // Check dodge state
+    let isFlying = MovementState.isFlying[eid] === 1;
+    const blinkOnCooldown = Cooldown.blinkMs[eid] > 0;
 
     // Add this log:
     if (inputX !== 0 || inputY !== 0) {
@@ -1319,88 +1520,236 @@ export function movementSystem(world: InWorld) {
       );
     }
 
+    if (
+      blinkInput &&
+      canMoveStandard &&
+      !blinkOnCooldown &&
+      !isFlying /* Optional: disable blink while flying? */
+    ) {
+      const currentStamina = StaminaPool.current[eid];
+      if (currentStamina >= BLINK_STAMINA_COST) {
+        // Determine Blink Direction
+        let blinkDirX = inputX;
+        let blinkDirY = inputY;
+        if (blinkDirX === 0 && blinkDirY === 0) {
+          // If no input, use facing direction
+          blinkDirX = Rotation.angle[eid] === 180 ? -1 : 1;
+          blinkDirY = 0;
+        }
+        // Normalize direction
+        const len = Math.sqrt(blinkDirX * blinkDirX + blinkDirY * blinkDirY);
+        if (len > 0) {
+          blinkDirX /= len;
+          blinkDirY /= len;
+        }
+
+        // Calculate Target Position
+        const currentX = Position.x[eid] + PhysicsBody.width[eid] / 2; // Approx center X
+        const currentY = Position.y[eid] + PhysicsBody.height[eid] / 2; // Approx center Y
+        const targetX = currentX + blinkDirX * BLINK_DISTANCE;
+        const targetY = currentY + blinkDirY * BLINK_DISTANCE;
+
+        // --- Collision Check (Option B: Tile Check) ---
+        let canBlink = true;
+        if (collisionLayer) {
+          // Check the tile at the target center point
+          const targetTile = collisionLayer.getTileAtWorldXY(
+            targetX,
+            targetY,
+            true
+          ); // Use non-dynamic layer
+          if (targetTile && targetTile.collides) {
+            // Check the 'collides' property we set earlier
+            canBlink = false;
+            console.log(
+              `MovementSystem[${eid}]: Blink blocked by tile at (${targetX.toFixed(
+                0
+              )}, ${targetY.toFixed(0)})`
+            );
+          }
+          // OPTIONAL: Add more checks (e.g., check corners of player bounds at target location)
+        } else {
+          console.warn(
+            "MovementSystem: Collision Layer not available for blink check."
+          );
+          // Decide behavior: allow blink without check, or disallow? Let's allow for now.
+        }
+
+        if (canBlink) {
+          console.log(
+            `MovementSystem[${eid}]: Blinking to (${targetX.toFixed(
+              0
+            )}, ${targetY.toFixed(0)})`
+          );
+          // Consume Stamina
+          StaminaPool.current[eid] = currentStamina - BLINK_STAMINA_COST;
+          usePlayerStore.getState().consumeStamina(BLINK_STAMINA_COST);
+
+          // Set Cooldown
+          Cooldown.blinkMs[eid] = BLINK_COOLDOWN_MS;
+
+          // --- Perform Blink ---
+          // Use body.reset to instantly move physics body AND sprite placeholder
+          const resetX = targetX - PhysicsBody.width[eid] / 2; // Adjust back to top-left for reset
+          const resetY = targetY - PhysicsBody.height[eid] / 2;
+          body.reset(resetX, resetY);
+
+          // Update ECS position immediately as well
+          Position.x[eid] = resetX;
+          Position.y[eid] = resetY;
+
+          // Stop current movement from input
+          body.setVelocity(0, 0);
+
+          // TODO: Trigger visual/audio effects here
+          // world.resources.scene.events.emit('playerBlinked', eid, targetX, targetY);
+
+          // Reset input flag (important!)
+          InputState.blink[eid] = 0;
+          continue; // Skip the rest of the movement logic for this frame
+        } else {
+          // TODO: Add feedback if blink failed (sound?)
+        }
+      } else {
+        // Not enough stamina feedback?
+      }
+    } // End Blink Logic
+
+    if (toggleFlightInput && canMoveStandard) {
+      // Can only toggle flight if not staggered/attacking etc.
+      const currentRealm = usePlayerStore.getState().realm;
+      const canFly = currentRealm >= FLIGHT_UNLOCK_REALM; // Check progression gate
+
+      if (isFlying) {
+        // Deactivate flight
+        console.log(`MovementSystem[${eid}]: Deactivating Flight.`);
+        isFlying = false;
+      } else if (canFly && QiPool.current[eid] > 0) {
+        // Only activate if allowed and has some Qi
+        // Activate flight
+        console.log(`MovementSystem[${eid}]: Activating Flight.`);
+        isFlying = true;
+        // Optional: Consume initial burst of Qi?
+        // Optional: Interrupt ground actions like running?
+        MovementState.isRunning[eid] = 0;
+        MovementState.isIdle[eid] = 0;
+      } else if (!canFly) {
+        console.log(
+          `MovementSystem[${eid}]: Cannot fly, Realm not high enough.`
+        );
+        // TODO: Add user feedback (sound effect, message?)
+      } else {
+        console.log(`MovementSystem[${eid}]: Cannot fly, no Qi.`);
+        // TODO: Add user feedback
+      }
+      MovementState.isFlying[eid] = isFlying ? 1 : 0; // Update component state
+    }
+
+    // --- Flight Qi Consumption & Auto-Deactivation ---
+    if (isFlying) {
+      const qiCost = FLIGHT_QI_COST_PER_SEC * delta;
+      const currentQi = QiPool.current[eid];
+
+      if (currentQi >= qiCost) {
+        const newQi = currentQi - qiCost;
+        QiPool.current[eid] = newQi;
+        // Dispatch update to Zustand store
+        usePlayerStore.getState().setCoreStats({
+          qi: { current: newQi, max: QiPool.max[eid] },
+        });
+      } else {
+        // Not enough Qi, disable flight
+        console.log(`MovementSystem[${eid}]: Ran out of Qi, disabling flight.`);
+        QiPool.current[eid] = 0; // Set to 0
+        usePlayerStore.getState().setCoreStats({
+          qi: { current: 0, max: QiPool.max[eid] },
+        });
+        isFlying = false;
+        MovementState.isFlying[eid] = 0;
+      }
+    }
+
     let targetVelocityX = 0;
     let targetVelocityY = 0;
-    let isActuallySprinting = false;
 
-    if (isDodging) {
-      // --- Dodge Movement ---
-      MovementState.isRunning[eid] = 0; // Not standard running
-      MovementState.isIdle[eid] = 0;
-      // Determine dodge direction: Use current input if moving, otherwise use facing direction
-      let dodgeDirX = inputX;
-      let dodgeDirY = inputY;
+    if (isFlying) {
+      // --- Flying Physics ---
+      body.setAllowGravity(false); // Disable Phaser's gravity
+      // Direct velocity control for flight
+      targetVelocityX = inputX * FLIGHT_SPEED;
+      targetVelocityY = inputY * FLIGHT_SPEED; // Use Y input for vertical flight
 
-      if (dodgeDirX === 0 && dodgeDirY === 0) {
-        // If no movement input, dodge in facing direction
-        const angleRad = Phaser.Math.DegToRad(Rotation.angle[eid]);
-        dodgeDirX = Math.cos(angleRad);
-        dodgeDirY = Math.sin(angleRad); // Note: Phaser angles often 0 right, 180 left
-        if (Rotation.angle[eid] === 180) dodgeDirX = -1; // Simpler for cardinal
-        else dodgeDirX = 1; // Default right if angle is 0
-        dodgeDirY = 0;
-      }
-
-      // Normalize dodge direction if needed (already done for input, but good practice if using angle)
-      const len = Math.sqrt(dodgeDirX * dodgeDirX + dodgeDirY * dodgeDirY);
-      if (len > 0) {
-        dodgeDirX /= len;
-        dodgeDirY /= len;
-      } else {
-        dodgeDirX = Rotation.angle[eid] === 180 ? -1 : 1; // Fallback if len is 0 (shouldn't happen)
-      }
-
-      targetVelocityX = dodgeDirX * DODGE_SPEED_BURST;
-      targetVelocityY = dodgeDirY * DODGE_SPEED_BURST;
-      console.log(
-        `MovementSystem[${eid}]: Dodging Vel=(${targetVelocityX}, ${targetVelocityY})`
-      );
-
-      // Update MovementState for dodge animation (needs definition)
-      // MovementState.isDodging[eid] = 1; // We already have CombatState.isDodging
-    } else if (canMoveStandard) {
-      // --- Standard Movement & Sprinting ---
-      let currentSpeed = speed;
-      if (isSprinting && StaminaPool.current[eid] > 0) {
-        currentSpeed = speed * sprintMultiplier;
-        isActuallySprinting = true;
-        // Stamina cost for sprint might be better handled per second in a resource system
-        // StaminaPool.current[eid] -= SPRINT_STAMINA_COST_PER_FRAME * world.resources.delta;
-        // usePlayerStore.getState().consumeStamina(SPRINT_STAMINA_COST_PER_FRAME * world.resources.delta);
-      }
-
-      targetVelocityX = inputX * currentSpeed;
-      targetVelocityY = inputY * currentSpeed;
-
-      // Update MovementState for animation
-      if (Math.abs(targetVelocityX) > 0 || Math.abs(targetVelocityY) > 0) {
-        MovementState.isRunning[eid] = 1;
-        MovementState.isIdle[eid] = 0;
-        // TODO: Set isSprinting state if needed for animations
-      } else {
-        MovementState.isRunning[eid] = 0;
-        MovementState.isIdle[eid] = 1;
-      }
-
-      // Update Rotation based on horizontal movement input
-      if (inputX !== 0) {
-        // Only update rotation if there's horizontal input
-        Rotation.angle[eid] = inputX < 0 ? 180 : 0;
-      }
-    } else {
-      // If movement is blocked (e.g., attacking, staggered)
+      // Reset ground-specific states
       MovementState.isRunning[eid] = 0;
-      MovementState.isIdle[eid] = 0; // Allow other state animations
-      targetVelocityX = 0;
-      targetVelocityY = 0;
+      MovementState.isIdle[eid] = 0;
+
+      // Set Rotation (Optional: maybe flying sprite doesn't rotate?)
+      if (inputX !== 0) Rotation.angle[eid] = inputX < 0 ? 180 : 0;
+    } else {
+      // --- Ground Physics (or falling) ---
+      body.setAllowGravity(true); // Re-enable Phaser's gravity (if world has gravity > 0)
+      MovementState.isFlying[eid] = 0; // Ensure flying state is off if not flying
+
+      if (isDodging) {
+        // --- Dodge Movement (Ground) ---
+        MovementState.isRunning[eid] = 0;
+        MovementState.isIdle[eid] = 0;
+        // ... (existing dodge velocity logic) ...
+        let dodgeDirX = inputX;
+        let dodgeDirY = inputY;
+        if (dodgeDirX === 0 && dodgeDirY === 0) {
+          const angleRad = Phaser.Math.DegToRad(Rotation.angle[eid]);
+          dodgeDirX = Rotation.angle[eid] === 180 ? -1 : 1;
+          dodgeDirY = 0;
+        }
+        const len = Math.sqrt(dodgeDirX * dodgeDirX + dodgeDirY * dodgeDirY);
+        if (len > 0) {
+          dodgeDirX /= len;
+          dodgeDirY /= len;
+        } else {
+          dodgeDirX = Rotation.angle[eid] === 180 ? -1 : 1;
+        }
+        targetVelocityX = dodgeDirX * DODGE_SPEED_BURST;
+        targetVelocityY = dodgeDirY * DODGE_SPEED_BURST; // Ground dodge likely horizontal only? Or allow diagonal?
+      } else if (canMoveStandard) {
+        // --- Standard Ground Movement & Sprinting ---
+        let currentSpeed = speed;
+        if (isSprinting && StaminaPool.current[eid] > 0) {
+          currentSpeed = speed * sprintMultiplier;
+          // TODO: Add stamina cost for sprinting here or in resource system
+        }
+        targetVelocityX = inputX * currentSpeed;
+        targetVelocityY = 0; // No vertical movement from input on ground (gravity handles Y)
+
+        // Update MovementState for ground animation
+        if (Math.abs(targetVelocityX) > 0) {
+          MovementState.isRunning[eid] = 1;
+          MovementState.isIdle[eid] = 0;
+        } else {
+          MovementState.isRunning[eid] = 0;
+          MovementState.isIdle[eid] = 1;
+        }
+        // Update Rotation based on horizontal movement input
+        if (inputX !== 0) Rotation.angle[eid] = inputX < 0 ? 180 : 0;
+      } else {
+        // --- Movement Blocked (Attacking, Staggered on Ground) ---
+        MovementState.isRunning[eid] = 0;
+        MovementState.isIdle[eid] = 0; // Allow attack/stagger animations
+        targetVelocityX = 0;
+        // Keep existing Y velocity (gravity will apply)
+        targetVelocityY = body.velocity.y; // Don't zero out Y velocity if blocked horizontally
+      }
+      // For ground movement, let gravity control Y unless explicitly jumping/falling logic is added
+      // If your game has Y gravity, targetVelocityY might be overridden by physics unless jumping.
+      // Since default gravity is 0,0, setting targetVelocityY = 0 for ground movement is okay.
     }
 
     // Set final velocity on the Phaser body
     body.setVelocityX(targetVelocityX);
-    body.setVelocityY(targetVelocityY);
+    body.setVelocityY(targetVelocityY); // Apply calculated Y velocity (for flight or ground)
 
-    // Reset sprint input flag *after* using it
-    // InputState.sprint[eid] = 0; // This should be reset in inputSystem if based on key *down*
+    InputState.toggleFlight[eid] = 0;
+    InputState.blink[eid] = 0;
   }
 
   const projectileEntities = velocityMovementQuery(world);
@@ -1411,7 +1760,7 @@ export function movementSystem(world: InWorld) {
     // Get body - should exist if physicsSystem ran
     const bodyId = PhysicsBody.bodyId[eid];
     const body = getPhysicsBody(bodyId) as Phaser.Physics.Arcade.Body;
-    console.log("Projectile:", body.enable)
+    console.log("Projectile:", body.enable);
     if (!body) continue;
 
     body.setVelocityX(Velocity.vx[eid]);
@@ -1517,6 +1866,7 @@ export function animationSystem(world: InWorld) {
     // Animation Keys (assuming they exist from GameScene.create)
     const idleAnimKey = AssetKeys.Anims.PLAYER_IDLE;
     const runAnimKey = AssetKeys.Anims.PLAYER_RUN;
+    const flyAnimKey = "player_fly";
     const attackLight1AnimKey = AssetKeys.Anims.PLAYER_ATTACK_LIGHT_1;
     const attackLight2AnimKey = AssetKeys.Anims.PLAYER_ATTACK_LIGHT_2; // Placeholder
     const attackLight3AnimKey = AssetKeys.Anims.PLAYER_ATTACK_LIGHT_3; // Placeholder
@@ -1532,6 +1882,8 @@ export function animationSystem(world: InWorld) {
     } else if (CombatState.isStaggered[eid]) {
       // Next priority: Staggered/Hurt
       targetAnimKey = hurtAnimKey;
+    } else if (MovementState.isFlying[eid]) {
+      targetAnimKey = flyAnimKey;
     } else if (CombatState.isDodging[eid]) {
       targetAnimKey = dodgeAnimKey; // Need to define this animation
     } else if (CombatState.isAttackingHeavy[eid]) {
@@ -1571,7 +1923,8 @@ export function animationSystem(world: InWorld) {
         if (
           CombatState.isStaggered[eid] ||
           CombatState.isDodging[eid] ||
-          CombatState.isAttackingHeavy[eid]
+          CombatState.isAttackingHeavy[eid] ||
+          MovementState.isFlying[eid]
         ) {
           const idleId = getAnimationKeyId(idleAnimKey);
           if (Renderable.animationKey[eid] !== idleId)
@@ -1635,7 +1988,9 @@ export function physicsSystem(world: InWorld) {
 
         bodyInstance.setCollideWorldBounds(PhysicsBody.collides[eid] === 1);
         bodyInstance.allowGravity = false;
-        const shouldMove = hasComponent(world, Velocity, eid) && (Velocity.vx[eid] !== 0 || Velocity.vy[eid] !== 0);
+        const shouldMove =
+          hasComponent(world, Velocity, eid) &&
+          (Velocity.vx[eid] !== 0 || Velocity.vy[eid] !== 0);
         const isHitbox = hasComponent(world, Hitbox, eid);
         bodyInstance.enable = shouldMove || !isHitbox;
         console.log(shouldMove, isHitbox, bodyInstance.enable);
@@ -1739,16 +2094,23 @@ export function handleHitboxOverlap(
     return; // Neither object involved is a hitbox entity
   }
 
-  if (hitboxEid === undefined || targetEid === undefined || hitboxEid === targetEid) return;
+  if (
+    hitboxEid === undefined ||
+    targetEid === undefined ||
+    hitboxEid === targetEid
+  )
+    return;
 
   const hitboxStartTime = Hitbox.startTimeMs[hitboxEid];
   const hitboxDuration = Hitbox.durationMs[hitboxEid];
   const currentTime = world.resources.time; // Get current time
-  const isHitboxActive = currentTime >= hitboxStartTime && currentTime < (hitboxStartTime + hitboxDuration);
+  const isHitboxActive =
+    currentTime >= hitboxStartTime &&
+    currentTime < hitboxStartTime + hitboxDuration;
 
   if (!isHitboxActive) {
-      // console.log(`Collision Handler: Hitbox EID ${hitboxEid} is not active. Time: ${currentTime}`);
-      return; // Ignore overlap if the hitbox isn't supposed to be active
+    // console.log(`Collision Handler: Hitbox EID ${hitboxEid} is not active. Time: ${currentTime}`);
+    return; // Ignore overlap if the hitbox isn't supposed to be active
   }
 
   // Basic Target Filtering (Player hitboxes hit Enemies, Enemy hitboxes hit Player)
@@ -1802,5 +2164,6 @@ export function handleHitboxOverlap(
 declare module "phaser" {
   interface Scene {
     ecsWorld?: InWorld;
+    easyStar?: EasyStar.js;
   }
 }

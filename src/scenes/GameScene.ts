@@ -36,9 +36,14 @@ import {
   renderSystem, // Update Phaser sprites based on final ECS state
   handleHitboxOverlap,
   aiSystem,
+  resourceRegenSystem,
 } from "@/features/common/systems";
 import { InWorld } from "@/types";
 import * as AssetKeys from "@/constants/assets"; // Import constants
+
+import EasyStar from "easystarjs";
+
+const aiPathMap = new Map<number, { x: number; y: number }[]>();
 
 export default class GameScene extends Phaser.Scene {
   public playerGroup!: Phaser.Physics.Arcade.Group; // Use '!' - we initialize in create()
@@ -51,6 +56,10 @@ export default class GameScene extends Phaser.Scene {
 
   // Store input instance for systems
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
+
+  private collisionLayer?: Phaser.Tilemaps.TilemapLayer | null;
+  private map!: Phaser.Tilemaps.Tilemap; // Store the map reference
+  public easystar!: EasyStar.js; // <-- Make easystar instance public or pass via resources
 
   // Flag to ensure colliders/overlaps are added only once
   private physicsSetupDone = false;
@@ -76,20 +85,87 @@ export default class GameScene extends Phaser.Scene {
     );
 
     this.load.image("game_bg", "assets/images/game_bg.png");
+    this.load.image("tileset_main", "assets/images/spritesheet.png");
+    this.load.tilemapTiledJSON("tilemap_main", "assets/data/map.json");
   }
 
   create() {
-    const {width, height} = this.scale;
+    const { width, height } = this.scale;
     console.log("GameScene started");
+    aiPathMap.clear();
 
-    this.add.image(width/2, height/2, 'game_bg').setDisplaySize(width, height);
+    // this.add
+    //   .image(width / 2, height / 2, "game_bg")
+    //   .setDisplaySize(width, height);
 
     this.physicsSetupDone = false;
     this.cursors = this.input.keyboard?.createCursorKeys();
     this.world = createWorld();
     this.scene.get(AssetKeys.Scenes.UI).scene.restart();
-
     this.ecsWorld = this.world;
+
+    // --- CREATE TILEMAP ---
+    this.map = this.make.tilemap({ key: "tilemap_main" });
+    const tileset = this.map.addTilesetImage(
+      "Tileset",
+      "tileset_main"
+    ); // Match names
+
+    if (!tileset) {
+      console.error("Failed to load tileset! Check names in Tiled vs code.");
+      return; // Stop create if tileset fails
+    }
+
+    this.map.createLayer("Background", tileset, 0, 0);
+    this.collisionLayer = this.map.createLayer("Collision", tileset, 0, 0); // Assign to the class property
+
+    if (!this.collisionLayer) {
+      console.error(
+        "Failed to create Collision tilemap layer! Check layer name in Tiled."
+      );
+      return; // Stop create if layer fails
+    }
+    this.collisionLayer.setCollisionByProperty({ collides: true });
+    console.log("Collision layer created and collision set by property.");
+
+    // --- Initialize EasyStar ---
+    this.easystar = new EasyStar.js();
+    const grid: number[][] = [];
+    const acceptableTiles: number[] = [];
+
+    // Create grid and identify walkable tiles
+    for (let y = 0; y < this.map.height; y++) {
+      const row: number[] = [];
+      for (let x = 0; x < this.map.width; x++) {
+        const tile = this.map.getTileAt(x, y, false, "Collision"); // Get tile from Collision layer
+        const tileIndex = tile ? tile.index : -1; // Use tile.index (-1 if no tile)
+        row.push(tileIndex);
+
+        // Tile is acceptable if it exists AND does NOT have the 'collides' property
+        // Or if there's no tile at all on the collision layer (empty space is walkable)
+        if ((tile && !tile.properties.collides) || !tile) {
+          // Make sure we don't add duplicates or -1 if it's not used as a tile index
+          if (tileIndex !== -1 && !acceptableTiles.includes(tileIndex)) {
+            acceptableTiles.push(tileIndex);
+          }
+          // Handle empty space: we need to tell EasyStar to accept a specific value for empty grid cells if its index is -1
+          // Let's assume index -1 represents empty walkable space.
+          if (tileIndex === -1 && !acceptableTiles.includes(-1)) {
+            acceptableTiles.push(-1); // Accept "no tile" index
+          }
+        }
+      }
+      grid.push(row);
+    }
+
+    this.easystar.setGrid(grid);
+    this.easystar.setAcceptableTiles(acceptableTiles);
+    this.easystar.enableDiagonals(); // Optional: Allow diagonal movement
+    // this.easystar.disableCornerCutting(); // Optional: Prevent cutting corners
+    this.easystar.setIterationsPerCalculation(1000); // Prevent blocking
+
+    console.log("EasyStar initialized. Acceptable tiles:", acceptableTiles);
+    // console.log("EasyStar Grid:", grid); // Log grid for debugging if needed
 
     this.playerGroup = this.physics.add.group({
       classType: Phaser.GameObjects.Sprite,
@@ -179,6 +255,17 @@ export default class GameScene extends Phaser.Scene {
         }), // EXAMPLE frames
         frameRate: 6,
         repeat: 0, // Don't loop death animation
+      });
+    }
+
+    if (!this.anims.exists("player_fly")) {
+      this.anims.create({
+        key: "player_fly",
+        frames: this.anims.generateFrameNumbers(AssetKeys.Textures.PLAYER, {
+          frames: [12, 14, 16],
+        }),
+        frameRate: 4,
+        repeat: 0,
       });
     }
 
@@ -336,7 +423,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   setupPhysicsInteractions() {
-    if (this.physicsSetupDone) return;
+    if (this.physicsSetupDone || !this.collisionLayer) return;
     console.log("Setting up physics interactions...");
 
     // --- Colliders ---
@@ -353,6 +440,11 @@ export default class GameScene extends Phaser.Scene {
     }
     // Collide player with enemies (optional, based on gameplay - maybe only overlap?)
     // this.physics.add.collider(this.playerGroup, this.enemyGroup);
+
+    this.physics.add.collider(this.playerGroup, this.collisionLayer);
+    // Collide enemy group with the tilemap collision layer
+    this.physics.add.collider(this.enemyGroup, this.collisionLayer);
+    console.log("Added Player/Enemy <> Tilemap colliders.");
 
     // --- Overlaps (TDD 4.4.4) ---
     // Player Hitbox vs Enemy Group
@@ -378,10 +470,7 @@ export default class GameScene extends Phaser.Scene {
   }
 
   update(time: number, delta: number) {
-    if (!this.world) {
-      //|| !this.pipeline) {
-      return;
-    }
+    if (!this.world || !this.easystar || !this.collisionLayer) return; // Ensure essentials exist
 
     this.world.resources = {
       time,
@@ -390,6 +479,10 @@ export default class GameScene extends Phaser.Scene {
       playerGroup: this.playerGroup,
       enemyGroup: this.enemyGroup,
       playerHitboxGroup: this.playerHitboxGroup,
+      easystar: this.easystar,
+      collisionLayer: this.collisionLayer,
+      aiPathMap: aiPathMap,
+      map: this.map
     };
 
     if (!this.physicsSetupDone) {
@@ -397,6 +490,7 @@ export default class GameScene extends Phaser.Scene {
     }
 
     inputSystem(this.world);
+    resourceRegenSystem(this.world);
     cooldownSystem(this.world);
     aiSystem(this.world);
     combatSystem(this.world);
@@ -407,6 +501,8 @@ export default class GameScene extends Phaser.Scene {
     damageSystem(this.world);
     animationSystem(this.world);
     renderSystem(this.world);
+
+    this.easystar.calculate();
   }
 
   // --- Collision Handlers (To be implemented based on TDD 4.4.5) ---
